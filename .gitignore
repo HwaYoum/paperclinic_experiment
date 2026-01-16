@@ -1,0 +1,15 @@
+# Environment variables
+.env
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.venv
+venv/
+ENV/
+
+# Project specific
+papers/*.pdf
+synthetic_aes_dataset_*.json
+debug_gemini.py

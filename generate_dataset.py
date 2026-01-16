@@ -80,7 +80,7 @@ def construct_prompt_data(
     
     system_message = (
         "You are an AI assistant tasked with generating synthetic student essays "
-        "that simulate specific levels of writing proficiency based on a provided rubric."
+        "that simulate specific levels of writing proficiency in Korean based on a provided rubric."
     )
     
     user_instruction_header = (
@@ -218,7 +218,7 @@ def main():
         paper_title = os.path.splitext(filename)[0].replace("_", " ").title()
         print(f"\nProcessing: {paper_title}")
         
-        context_text = extract_pdf_context(pdf_path, max_pages=2)
+        context_text = extract_pdf_context(pdf_path, max_pages=3)
         if not context_text: continue
             
         question = "Summarize the paper's core contributions and arguments based on the provided text."
@@ -234,7 +234,9 @@ def main():
             )
             dataset_output["data"].append(entry)
 
-    output_filename = f"synthetic_aes_dataset_{timestamp}.json"
+    output_dir = "outputs"
+    os.makedirs(output_dir, exist_ok=True)
+    output_filename = os.path.join(output_dir, f"synthetic_aes_dataset_{timestamp}.json")
     with open(output_filename, "w", encoding="utf-8") as f:
         json.dump(dataset_output, f, indent=2, ensure_ascii=False)
     

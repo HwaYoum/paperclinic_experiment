@@ -9,7 +9,13 @@ __pycache__/
 venv/
 ENV/
 
-# Project specific
+# Project specific outputs (Ignore all generated data)
+outputs/
+*.json
+*.csv
+
+# Extracted PDFs (Do not commit raw papers)
 papers/*.pdf
-synthetic_aes_dataset_*.json
+
+# Debug scripts
 debug_gemini.py

@@ -6,80 +6,75 @@
 
 ## 1. 주요 기능
 
-*   **PDF 텍스트 추출:** `pypdf`를 사용하여 논문 PDF의 초반부 내용을 자동으로 추출합니다.
-*   **합성 데이터 생성:** Gemini 1.5 Pro/Flash 모델을 이용해 주어진 논문을 요약하는 에세이를 생성합니다.
-*   **동적 프롬프트 (Dynamic Prompting):** 6가지 평가 항목(내용, 설득력, 비판적 사고, 구조, 표현, 형식)에 대해 무작위 점수(1~5점)를 부여하고, 각 점수에 해당하는 루브릭(Rubric) 정의를 프롬프트에 주입하여 의도적인 품질 저하/향상을 시뮬레이션합니다.
-*   **JSON 데이터셋 구축:** 생성된 에세이와 목표 점수(Target Scores), 원본 텍스트 등을 구조화된 JSON 형식으로 저장합니다.
+*   **PDF 텍스트 추출:** `pypdf`를 사용하여 논문 PDF의 초반 2페이지 내용을 자동으로 추출합니다.
+*   **합성 데이터 생성:** Gemini API를 이용해 주어진 논문을 요약하는 에세이를 생성합니다. (기본 모델: `gemini-1.5-pro`)
+*   **동적 프롬프트 (Dynamic Prompting):** 6가지 평가 항목에 대해 무작위 점수(1~5점)를 부여하고, 해당 루브릭 정의를 프롬프트에 주입하여 다양한 품질의 에세이를 시뮬레이션합니다.
+*   **결과 관리:** 모든 결과물은 `outputs/` 폴더 내에 타임스탬프와 함께 저장되어 버전 관리가 용이합니다.
+*   **포맷 변환:** 생성된 JSON 데이터를 분석하기 쉬운 CSV 형식으로 변환하는 도구를 제공합니다.
 
-## 2. 데이터셋 구조 (Output Schema)
+## 2. 파일 구조
 
-생성된 `.json` 파일은 다음과 같은 구조를 가집니다:
+*   `generate_dataset.py`: 메인 데이터 생성 스크립트.
+*   `json_to_csv.py`: 최신 JSON 결과물을 CSV로 변환하는 스크립트.
+*   `debug_gemini.py`: API 연결 및 환경 변수 설정을 점검하는 도구.
+*   `papers/`: 분석할 논문 PDF 파일을 넣는 디렉토리.
+*   `outputs/`: 생성된 JSON 및 CSV 파일이 저장되는 디렉토리 (Git 추적 제외).
+*   `.env`: API Key 등 민감 정보를 보관하는 파일 (Git 추적 제외).
+
+## 3. 설치 및 실행 방법
+
+### 요구 사항 (Requirements)
+Python 3.10 이상 권장.
+
+```bash
+pip install -r requirements.txt
+```
+
+### 환경 변수 설정 (.env)
+프로젝트 루트에 `.env` 파일을 생성하고 다음과 같이 API 키를 입력합니다.
+```env
+GEMINI_API_KEY=your_actual_api_key_here
+```
+
+### 데이터 생성 실행
+```bash
+python generate_dataset.py
+```
+*   `papers/` 폴더의 각 PDF당 20개의 샘플을 생성합니다.
+*   결과물 예시: `outputs/synthetic_aes_dataset_20260116_153000.json`
+
+### CSV 변환
+```bash
+python json_to_csv.py
+```
+*   `outputs/` 폴더에서 가장 최근에 생성된 JSON 파일을 찾아 동일한 이름의 CSV로 변환합니다.
+
+## 4. 데이터셋 구조 (Output Schema)
 
 ```json
 {
   "dataset_info": {
     "version": "1.2",
-    "description": "Synthetic AES Dataset via google-genai",
-    "generated_at": "20260116_143005"
+    "generated_at": "20260116_153000",
+    "description": "Synthetic AES Dataset via google-genai"
   },
   "data": [
     {
       "id": "uuid-string",
-      "meta": {
-        "paper_title": "Paper Title",
-        "filename": "paper.pdf"
-      },
-      "input": {
-        "context_text": "Extracted text from PDF...",
-        "question": "Summarize the paper's core contributions..."
-      },
+      "meta": { "paper_title": "...", "filename": "..." },
+      "input": { "context_text": "...", "question": "..." },
       "generation_config": {
         "model_name": "gemini-1.5-pro",
-        "target_labels": {
-          "content": 4,
-          "persuasiveness": 3,
-          "critical_thinking": 2,
-          "organization": 5,
-          "expression": 4,
-          "formatting": 3
-        }
+        "target_labels": { "content": 3, "persuasiveness": 2, ... }
       },
-      "output": {
-        "generated_essay": "Generated essay content..."
-      }
+      "output": { "generated_essay": "..." }
     }
   ]
 }
 ```
 
-## 3. 설치 및 실행 방법
+## 5. 주의 사항 (Important)
 
-### 요구 사항 (Requirements)
-Python 3.10 이상이 권장됩니다.
-
-```bash
-pip install -r requirements.txt
-```
-*`requirements.txt`에는 `google-genai`, `pypdf`, `python-dotenv`가 포함되어 있습니다.*
-
-### 환경 변수 설정 (.env)
-프로젝트 루트에 `.env` 파일을 생성하고 Gemini API 키를 입력하세요.
-```env
-GEMINI_API_KEY=your_api_key_here
-```
-
-### 실행
-`papers/` 폴더에 분석할 PDF 파일들을 넣은 후 스크립트를 실행합니다.
-```bash
-python generate_dataset.py
-```
-스크립트는 폴더 내의 모든 PDF를 순회하며, 각 논문당 20개의 에세이 변형(총 논문 수 × 20)을 생성하여 타임스탬프가 찍힌 JSON 파일로 저장합니다.
-
-## 4. 평가 루브릭 (6-Trait Analytic Rubric)
-이 실험은 다음 6가지 항목에 대한 한국어 루브릭을 기반으로 합니다:
-1.  **내용 이해 및 요약 (Content)**
-2.  **설득력 (Persuasiveness)**
-3.  **비판적 사고 및 학술적 맥락 (Critical Thinking)**
-4.  **구조 및 조직 (Organization)**
-5.  **표현 (Expression)**
-6.  **형식 (Formatting)**
+*   **API 비용:** 대량의 데이터를 생성할 경우 Gemini API 호출 비용이 발생할 수 있습니다.
+*   **저작권:** 생성된 데이터셋에는 논문 원문의 일부가 포함되어 있습니다. 저작권이 있는 논문을 사용한 경우, 데이터셋을 Public GitHub Repository 등에 **공개적으로 업로드하지 마십시오.** (기본적으로 `.gitignore`를 통해 차단되어 있습니다.)
+*   **보안:** `.env` 파일이 외부에 노출되지 않도록 주의하십시오.

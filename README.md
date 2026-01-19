@@ -1,15 +1,15 @@
 # Academic Writing Assessment Dataset Generator (CASE Implementation)
 
-이 프로젝트는 **Gold Data(만점 에세이)**를 생성한 후, **CASE(Corruption-based Augmentation Strategy)** 방식을 응용하여 의도적인 **노이즈(Noise)**를 주입함으로써 다양한 품질의 학술적 글쓰기(AES) 데이터를 구축하는 실험 도구입니다.
+이 프로젝트는 **Gold Data(만점 에세이)** 를 생성한 후, **CASE(Corruption-based Augmentation Strategy)** 방식을 응용하여 의도적인 **노이즈(Noise)** 를 주입함으로써 다양한 품질의 학술적 글쓰기(AES) 데이터를 구축하는 실험 도구입니다.
 
 Gemini API를 활용해 완벽한 에세이를 생성하고, 코드를 통해 문장 단위의 기계적 결함을 정교하게 주입하여 모델이 점수별 차이를 학습할 수 있도록 설계되었습니다.
 
 ## 1. 주요 접근 방식 (Methodology)
 
-이 도구는 **만점 답안(Gold Standard)**을 먼저 생성하고, 목표 점수(Target Score)에 비례하여 **망가뜨릴 문장의 비율**을 계산하는 방식을 사용합니다.
+이 도구는 **만점 답안(Gold Standard)** 을 먼저 생성하고, 목표 점수(Target Score)에 비례하여 **망가뜨릴 문장의 비율**을 계산하는 방식을 사용합니다.
 
 ### 1) CASE 기반 노이즈 비율 계산
-점수가 낮을수록 더 많은 문장에 노이즈를 주입합니다.
+점수가 낮을수록 더 많은 문장에 노이즈를 주입합니다.<br>
 $$ n_{sc} = \text{round} \left( n_{se} \times \frac{5.0 - \text{score}}{5.0} \right) $$
 *   $n_{se}$: 전체 문장 수
 *   $n_{sc}$: 노이즈를 주입할 문장 수

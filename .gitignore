@@ -19,3 +19,7 @@ papers/*.pdf
 
 # Debug scripts
 debug_gemini.py
+
+# Gemini CLI configuration
+.geminiignore
+.gemini/

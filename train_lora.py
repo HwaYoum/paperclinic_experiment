@@ -9,6 +9,7 @@
 # ==========================================
 
 import os
+import argparse
 import json
 import torch
 import numpy as np
@@ -27,41 +28,67 @@ from transformers import (
 from peft import LoraConfig, get_peft_model, TaskType, prepare_model_for_kbit_training
 
 # ---------------------------------------------------------
+# Argument Parsing
+# ---------------------------------------------------------
+parser = argparse.ArgumentParser(description="Fine-tune SOLAR-10.7B-Instruct with LoRA")
+parser.add_argument("--dataset_name", type=str, default=None, help="Hugging Face dataset ID (e.g., 'username/dataset'). If None, uses local train.jsonl")
+args, _ = parser.parse_known_args()
+
+# ---------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------
-# Using Qwen2.5-1.5B-Instruct. 
-# On Colab (T4 GPU), you can also try "Qwen/Qwen2.5-7B-Instruct" with this 4-bit config.
-MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct" 
+# Using Upstage SOLAR-10.7B-Instruct.
+# Note: This model requires approx 12GB+ VRAM with 4-bit quantization.
+MODEL_ID = "upstage/SOLAR-10.7B-Instruct-v1.0" 
 OUTPUT_DIR = "aes_finetuned"
 TRAIN_FILE = "train.jsonl"
-NUM_EPOCHS = 1 # Reduced to 1 due to high augmentation factor (100x)
-BATCH_SIZE = 4 
-GRADIENT_ACCUMULATION_STEPS = 4 # Effective batch size = 4 * 4 = 16
+NUM_EPOCHS = 3 # Increased to 3 for better convergence with larger batch size
+BATCH_SIZE = 16 
+GRADIENT_ACCUMULATION_STEPS = 4 # Effective batch size = 16 * 4 = 64
 LEARNING_RATE = 2e-4
 
 # ---------------------------------------------------------
 # 1. Load & Format Data
 # ---------------------------------------------------------
-print(f"Loading data from {TRAIN_FILE}...")
-def load_data(file_path):
-    data = []
-    with open(file_path, "r", encoding="utf-8") as f:
-        for line in f:
-            data.append(json.loads(line))
-    return data
+def load_data():
+    if args.dataset_name:
+        print(f"Loading dataset from Hugging Face Hub: {args.dataset_name}")
+        from datasets import load_dataset
+        # Load from Hub
+        ds = load_dataset(args.dataset_name, split="train")
+        return ds
+    else:
+        print(f"Loading data from local file: {TRAIN_FILE}...")
+        data = []
+        with open(TRAIN_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                data.append(json.loads(line))
+        return data
 
 def format_chat(example):
-    # Qwen/ChatML format
+    # Determine if input is a dict (local load) or HF dataset row
+    # HF dataset row keys are directly accessible
+    
+    instruction = example["instruction"]
+    input_text = example["input"]
+    output_text = example["output"]
+
+    # SOLAR format: Merge system instruction into the user message for better compatibility
     messages = [
-        {"role": "system", "content": example["instruction"]},
-        {"role": "user", "content": example["input"]},
-        {"role": "assistant", "content": example["output"]}
+        {"role": "user", "content": f"{instruction}\n\n{input_text}"},
+        {"role": "assistant", "content": output_text}
     ]
     return messages
 
-raw_data = load_data(TRAIN_FILE)
-formatted_data = [format_chat(d) for d in raw_data]
-hf_dataset = Dataset.from_list([{"messages": msgs} for msgs in formatted_data])
+raw_data = load_data()
+
+# Handle different data types (List[dict] vs Dataset)
+if isinstance(raw_data, list):
+    formatted_data = [format_chat(d) for d in raw_data]
+    hf_dataset = Dataset.from_list([{"messages": msgs} for msgs in formatted_data])
+else:
+    # It's a Hugging Face Dataset object
+    hf_dataset = raw_data.map(lambda x: {"messages": format_chat(x)}, remove_columns=raw_data.column_names)
 
 # Split: 90% Train, 10% Test
 print("Splitting data into Train (90%) and Test (10%)...")
@@ -85,6 +112,11 @@ bnb_config = BitsAndBytesConfig(
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 tokenizer.pad_token = tokenizer.eos_token
+tokenizer.padding_side = "right" # Fix for fp16 training stability
+
+# Explicitly set chat template for SOLAR if it's missing (Common for this model)
+if tokenizer.chat_template is None:
+    tokenizer.chat_template = "{% for message in messages %}{% if message['role'] == 'user' %}{{ '### User:\\n' + message['content'] + '\\n\\n' }}{% elif message['role'] == 'assistant' %}{{ '### Assistant:\\n' + message['content'] + eos_token }}{% endif %}{% endfor %}"
 
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID,
@@ -92,6 +124,7 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="auto",
     trust_remote_code=True
 )
+model.config.pad_token_id = tokenizer.pad_token_id # Explicitly sync pad_token_id
 
 # Prepare model for k-bit training (gradient checkpointing, etc.)
 model = prepare_model_for_kbit_training(model)
@@ -143,7 +176,7 @@ training_args = TrainingArguments(
     learning_rate=LEARNING_RATE,
     logging_steps=100,
     save_strategy="epoch",
-    evaluation_strategy="steps", # Evaluate during training
+    eval_strategy="steps", # Evaluate during training
     eval_steps=200,             # Evaluate every 200 steps
     fp16=True, 
     optim="paged_adamw_8bit",
@@ -207,6 +240,8 @@ results = {
     "true_scores": [],
     "base_scores": [],
     "ft_scores": [],
+    "base_errors": [],
+    "ft_errors": [],
     "details": []
 }
 
@@ -234,9 +269,9 @@ def extract_total_score(text):
     return None
 
 def generate_response(model, tokenizer, instruction, input_text):
+    # Merge instruction into user message for SOLAR compatibility
     messages = [
-        {"role": "system", "content": instruction},
-        {"role": "user", "content": input_text}
+        {"role": "user", "content": f"{instruction}\n\n{input_text}"}
     ]
     text = tokenizer.apply_chat_template(
         messages, 
@@ -283,96 +318,13 @@ for i, example in enumerate(eval_subset):
     
     # Collect Data
     results["true_scores"].append(true_score)
-    results["base_scores"].append(base_score if base_score is not None else 0.0)
-    results["ft_scores"].append(ft_score if ft_score is not None else 0.0)
-
-    print(f"     -> Base Score: {base_score} | FT Score: {ft_score}")
     
-    results["details"].append({
-        "true_score": true_score,
-        "base_output": base_output,
-        "base_score": base_score,
-        "ft_output": ft_output,
-        "ft_score": ft_score
-    })
-
-# --- QWK (Quadratic Weighted Kappa) Calculation ---
-def to_int_score(scores):
-    # QWK expects integers (1-5 range)
-    return [int(round(max(1.0, min(5.0, s)))) for s in scores]
-
-true_int = to_int_score(results["true_scores"])
-base_int = to_int_score(results["base_scores"])
-ft_int = to_int_score(results["ft_scores"])
-
-qwk_base = cohen_kappa_score(true_int, base_int, weights='quadratic')
-qwk_ft = cohen_kappa_score(true_int, ft_int, weights='quadratic')
-
-print(f"\nResults Summary (QWK):")
-print(f"  Base Model QWK: {qwk_base:.4f}")
-print(f"  Fine-tuned QWK: {qwk_ft:.4f}")
-
-# Save JSON Results
-final_results = {
-    "metrics": {
-        "qwk_base": qwk_base,
-        "qwk_ft": qwk_ft
-    },
-    "details": results["details"]
-}
-
-with open(os.path.join(OUTPUT_DIR, "statistical_results.json"), "w", encoding="utf-8") as f:
-    json.dump(final_results, f, ensure_ascii=False, indent=2)
-
-# Plot QWK Comparison
-plt.figure(figsize=(8, 6))
-models = ['Base Model', 'Fine-tuned Model']
-qwks = [qwk_base, qwk_ft]
-colors = ['gray', 'orange']
-
-plt.bar(models, qwks, color=colors)
-plt.title('Prediction Accuracy Comparison (QWK)')
-plt.ylabel('Quadratic Weighted Kappa (Higher is Better)')
-plt.ylim(-0.1, 1.1)
-for i, v in enumerate(qwks):
-    plt.text(i, v, f"{v:.4f}", ha='center', va='bottom')
-
-plot_path = os.path.join(OUTPUT_DIR, "qwk_comparison.png")
-plt.savefig(plot_path)
-print(f"QWK Plot saved to {plot_path}")
-
-print("Done! Download the folder to check 'qwk_comparison.png'.")
-
-for i, example in enumerate(eval_subset):
-    instruction = example["messages"][0]["content"]
-    input_text = example["messages"][1]["content"]
-    ground_truth_text = example["messages"][2]["content"]
-    
-    # Get True Score
-    true_score = extract_total_score(ground_truth_text)
-    if true_score is None: continue # Skip if ground truth is malformed
-
-    print(f"  [{i+1}/{eval_count}] Ground Truth: {true_score}")
-    
-    # 1. Base Model Prediction
-    with model.disable_adapter():
-        base_output = generate_response(model, tokenizer, instruction, input_text)
-    base_score = extract_total_score(base_output)
-    
-    # 2. Fine-tuned Prediction
-    ft_output = generate_response(model, tokenizer, instruction, input_text)
-    ft_score = extract_total_score(ft_output)
-    
-    # Collect Data
-    results["true_scores"].append(true_score)
-    
-    # Handle None for Base Model (if it failed to generate a score)
     if base_score is not None:
         results["base_scores"].append(base_score)
         results["base_errors"].append((base_score - true_score)**2)
     else:
-        results["base_scores"].append(0.0) # Dummy value for QWK list alignment
-        results["base_errors"].append((0.0 - true_score)**2) # Heavy penalty
+        results["base_scores"].append(0.0)
+        results["base_errors"].append((0.0 - true_score)**2)
 
     if ft_score is not None:
         results["ft_scores"].append(ft_score)
@@ -380,8 +332,8 @@ for i, example in enumerate(eval_subset):
     else:
         results["ft_scores"].append(0.0)
         results["ft_errors"].append((0.0 - true_score)**2)
-    
-    print(f"     -> Base: {base_score} | FT: {ft_score}")
+
+    print(f"     -> Base Score: {base_score} | FT Score: {ft_score}")
     
     results["details"].append({
         "true_score": true_score,
@@ -398,7 +350,6 @@ mse_base = np.mean(results["base_errors"]) if results["base_errors"] else 0
 mse_ft = np.mean(results["ft_errors"]) if results["ft_errors"] else 0
 
 # 2. QWK (Quadratic Weighted Kappa)
-# QWK expects integers. We round scores to nearest integer (1-5).
 def to_int_score(scores):
     return [int(round(max(1.0, min(5.0, s)))) for s in scores]
 

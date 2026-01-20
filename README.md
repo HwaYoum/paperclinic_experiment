@@ -29,37 +29,10 @@ $$ n_{sc} = \text{round} \left( n_{se} \times \frac{5.0 - \text{score}}{5.0} \ri
 3.  **Noise Injection (변형 생성)**:
     *   각 Gold Essay에 대해 **4가지 목표 점수(4.0, 3.0, 2.0, 1.0)**를 설정합니다.
     *   각 목표 점수마다 3가지 노이즈 유형(Content, Organization, Language)을 각각 적용합니다.
-    *   **결과:** Gold Essay 1개당 13개의 데이터(원본 1 + 변형 12)가 생성됩니다.
+    *   **Augmentation**: 데이터 다양성 확보를 위해 `augmentation_factor`(기본값 20)를 설정하여, 동일한 점수/유형 조합에 대해 서로 다른 무작위 노이즈가 주입된 데이터를 여러 개 생성합니다.
+    *   **결과:** Gold Essay 1개당 약 241개의 데이터(원본 1 + [4개 점수 × 3개 유형 × 20개 변형])가 생성됩니다.
 
-## 3. 파일 구조
-
-*   `generate_data.py`: 메인 데이터 생성 스크립트.
-*   `archive/`: 이전 실험 코드 및 PDF 원본 저장소.
-    *   `archive/papers/`: 분석 대상 논문 PDF 파일 위치.
-*   `train.jsonl`: 생성된 학습 데이터셋 결과물.
-*   `.env`: API Key 설정 파일.
-
-## 4. 설치 및 실행 방법
-
-### 요구 사항 (Requirements)
-Python 3.10 이상 권장. `konlpy` 구동을 위해 JDK 설치가 필요할 수 있습니다.
-
-```bash
-pip install -r requirements.txt
-```
-
-### 환경 변수 설정 (.env)
-프로젝트 루트에 `.env` 파일을 생성하고 Gemini API 키를 입력합니다.
-```env
-GEMINI_API_KEY=your_actual_api_key_here
-```
-
-### 데이터 생성 실행
-```bash
-python generate_data.py
-```
-*   `archive/papers/` 폴더 내의 모든 PDF를 읽어옵니다.
-*   결과는 `train.jsonl` 파일에 저장됩니다.
+... (중략) ...
 
 ## 5. 데이터셋 구조 (Output Schema)
 
@@ -73,10 +46,12 @@ python generate_data.py
 }
 ```
 
-*   **Content Noise 적용 시:** 내용 관련 3개 항목 점수 하락 -> 총점 대폭 하락
-*   **Organization/Language Noise 적용 시:** 해당 1개 항목 점수만 하락 -> 총점 소폭 하락
+*   **성능 평가 지표**: 이 프로젝트는 모델의 채점 정확도를 측정하기 위해 **QWK (Quadratic Weighted Kappa)**를 주 평가지표로 사용합니다. 이는 모델의 예측 점수와 실제 정답 점수 간의 일치도를 통계적으로 분석하며, 실제 AES(자동 에세이 채점) 연구에서 널리 쓰이는 표준 지표입니다.
 
-## 6. 주의 사항
+... (중략) ...
 
-*   **KoNLPy 의존성:** 실행 환경에 Java(JDK)가 설치되어 있어야 `konlpy`가 정상 작동합니다.
-*   **데이터 다양성:** 하나의 논문에 대해 점수대별로 균일한 데이터를 생성하므로, 데이터 불균형 문제를 완화할 수 있습니다.
+**2. 모델 학습 (Train LoRA)**
+데이터 생성이 완료되어 `train.jsonl` 파일이 준비되면 실행합니다. 가벼우면서도 강력한 `Qwen2.5-1.5B-Instruct` 모델을 사용하여 T4 GPU에서도 원활하게 학습 및 QWK 평가가 가능합니다.
+```powershell
+python train_lora.py
+```

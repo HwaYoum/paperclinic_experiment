@@ -2,7 +2,6 @@ google-generativeai
 pandas
 numpy
 regex
-kss
 konlpy
 torch
 transformers
@@ -12,3 +11,5 @@ accelerate
 datasets
 pypdf
 python-dotenv
+matplotlib
+scikit-learn

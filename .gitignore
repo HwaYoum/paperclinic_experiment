@@ -15,7 +15,7 @@ outputs/
 *.csv
 
 # Extracted PDFs (Do not commit raw papers)
-papers/*.pdf
+archive/papers/
 
 # Debug scripts
 debug_gemini.py

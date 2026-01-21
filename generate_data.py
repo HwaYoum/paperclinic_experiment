@@ -8,7 +8,7 @@ from typing import List, Dict, Tuple
 from pypdf import PdfReader
 from dotenv import load_dotenv
 import google.generativeai as genai
-from konlpy.tag import Okt
+from augmentation_utils import KoreanNoiseInjector
 
 # Load environment variables
 load_dotenv()
@@ -19,6 +19,9 @@ if not GENAI_API_KEY:
     print("Warning: GEMINI_API_KEY not found in environment variables.")
 else:
     genai.configure(api_key=GENAI_API_KEY)
+
+# Initialize Noise Injector (Loads Okt once)
+noise_injector = KoreanNoiseInjector()
 
 # ---------------------------------------------------------
 # 1. Rubric Definition
@@ -165,25 +168,6 @@ def generate_gold_essay(source_text: str, question: str) -> str:
 # 4. Step 2: CASE (Corruption-based Augmentation Strategy)
 # ---------------------------------------------------------
 
-def corrupt_sentence_grammar(sentence: str, okt: Okt) -> str:
-    """Applies Josa swapping to a single sentence."""
-    try:
-        chunk_pos = okt.pos(sentence)
-        new_chunk = ""
-        modified = False
-        for word, tag in chunk_pos:
-            if tag == 'Josa':
-                if word == '이': new_chunk += '을'; modified = True
-                elif word == '가': new_chunk += '를'; modified = True
-                elif word == '을': new_chunk += '이'; modified = True
-                elif word == '를': new_chunk += '가'; modified = True
-                else: new_chunk += word
-            else:
-                new_chunk += word
-        return new_chunk if modified else sentence # Only return modified if changes happened? No, return string.
-    except:
-        return sentence
-
 def apply_case_noise(text: str, noise_type: str, target_score: float, distractor_pool: List[str]) -> Tuple[str, float]:
     """
     Implements CASE:
@@ -210,21 +194,18 @@ def apply_case_noise(text: str, noise_type: str, target_score: float, distractor
             noisy_sentences[idx] = distractor
 
     elif noise_type == "Organization":
-        # Swap two randomly-sampled sentences. Repeat process?
-        # The paper says: "repeat this process based on the synthetic score".
-        # And "The higher number of swaps implies higher levels of corruption".
-        # If n_sc is the "number of corrupted sentences", and each swap corrupts position of 2 sentences (potentially).
-        # Let's perform n_sc swaps to be aggressive enough for lower scores.
+        # Swap two randomly-sampled sentences.
         for _ in range(n_sc):
             idx1, idx2 = random.sample(range(n_se), 2)
             noisy_sentences[idx1], noisy_sentences[idx2] = noisy_sentences[idx2], noisy_sentences[idx1]
 
     elif noise_type == "Language":
-        # Substitute randomly-sampled sentences into ungrammatical sentences
+        # Substitute randomly-sampled sentences into ungrammatical/malformed sentences
+        # using Weighted Random Mix of 6 error types.
         indices_to_corrupt = random.sample(range(n_se), n_sc)
-        okt = Okt()
         for idx in indices_to_corrupt:
-            noisy_sentences[idx] = corrupt_sentence_grammar(noisy_sentences[idx], okt)
+            # Apply weighted noise to the selected sentence
+            noisy_sentences[idx] = noise_injector.apply_weighted_noise(noisy_sentences[idx])
     
     return ' '.join(noisy_sentences), target_score 
 
@@ -250,9 +231,10 @@ def main():
     distractor_pool = get_distractor_sentences(count=30)
     print(f"Distractor Pool Size: {len(distractor_pool)}")
 
-    for pdf_path in pdf_files:
+    total_papers = len(pdf_files)
+    for i, pdf_path in enumerate(pdf_files):
         filename = os.path.basename(pdf_path)
-        print(f"\n=== Processing Paper: {filename} ===")
+        print(f"\n=== Processing Paper [{i+1}/{total_papers}]: {filename} ===")
         
         context_text = extract_pdf_context(pdf_path)
         if not context_text: continue
@@ -291,20 +273,17 @@ def main():
 
             # Iterate through Target Scores
             target_scores = [4.0, 3.0, 2.0, 1.0]
-            augmentation_factor = 20
+            augmentation_factor = 5
             
             for score in target_scores:
                 print(f"    Target Score: {score} (Generating {augmentation_factor} variations...)")
                 
                 for _ in range(augmentation_factor):
                     # Case A: Language Noise (Corrupts 'Format' & 'Expression')
-                    # Update: Affects both '5. 표현' and '6. 형식'.
-                    # Total Calculation: (Content(5) + Org(5) + Lang(score)) / 3
                     noisy_text_lang, _ = apply_case_noise(essay, "Language", score, distractor_pool)
                     total_score_lang = (5.0 + 5.0 + score) / 3.0
                     
                     dataset.append({
-                        "instruction": "당신은 한국어 학술 에세이 채점관입니다. 다음 에세이를 읽고 [내용 이해 및 요약, 설득력, 비판적 사고, 구조 및 조직, 표현, 형식] 6가지 항목에 대해 5점 만점으로 채점하고, JSON 형식으로 출력하세요.",
                         "input": noisy_text_lang,
                         "output": json.dumps({
                             "1. 내용 이해 및 요약": 5.0, "2. 설득력": 5.0, "3. 비판적 사고 및 학술적 맥락 파악": 5.0, 
@@ -314,8 +293,6 @@ def main():
                     })
 
                     # Case B: Organization Noise (Corrupts 'Structure')
-                    # Rubric: '4. 구조 및 조직'
-                    # Total Calculation: (Content(5) + Org(score) + Lang(5)) / 3
                     noisy_text_org, _ = apply_case_noise(essay, "Organization", score, distractor_pool)
                     total_score_org = (5.0 + score + 5.0) / 3.0
                     
@@ -330,8 +307,6 @@ def main():
                     })
 
                     # Case C: Content Noise (Corrupts 'Content' related traits)
-                    # Rubric: '1. 내용', '2. 설득력', '3. 비판적 사고'
-                    # Total Calculation: (Content(score) + Org(5) + Lang(5)) / 3
                     noisy_text_cont, _ = apply_case_noise(essay, "Content", score, distractor_pool)
                     total_score_cont = (score + 5.0 + 5.0) / 3.0
                     
@@ -345,7 +320,7 @@ def main():
                         }, ensure_ascii=False)
                     })
                 
-                # Prevent Rate Limiting (Moved outside the inner loop)
+                # Prevent Rate Limiting
                 time.sleep(0.1)
 
     # Save to JSONL

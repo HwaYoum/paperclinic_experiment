@@ -49,37 +49,53 @@ class KoreanNoiseInjector:
         return char
 
     def inject_josa_noise(self, text):
-        """Replaces particles (Josa) with incorrect ones."""
+        """Replaces particles (Josa) with incorrect ones, preserving whitespace."""
         try:
-            pos = self.okt.pos(text)
-            new_text = ""
+            words = text.split(' ')
+            new_words = []
             changed = False
             
-            for word, tag in pos:
-                if tag == 'Josa' and not changed and random.random() < 0.5:
-                    # Attempt to find a replacement
-                    candidates = self.josa_map.get(word)
-                    if not candidates:
-                        # Try partial match (last char)
-                        last_char = word[-1]
-                        candidates = self.josa_map.get(last_char)
+            for word in words:
+                # Skip empty strings from double spaces
+                if not word:
+                    new_words.append(word)
+                    continue
+                    
+                # Analyze the individual word (token)
+                # pos returns [(morph, tag), ...]
+                # E.g., "학교에" -> [('학교', 'Noun'), ('에', 'Josa')]
+                pos = self.okt.pos(word)
+                
+                if not pos:
+                    new_words.append(word)
+                    continue
+
+                # Check if the last morpheme is a Josa
+                last_morph, last_tag = pos[-1]
+                
+                # Probability to change: 50%
+                if last_tag == 'Josa' and not changed and random.random() < 0.5:
+                    target_josa = last_morph
+                    candidates = self.josa_map.get(target_josa)
                     
                     if candidates:
-                        new_text += random.choice(candidates)
+                        # Replace the Josa at the end of the word
+                        replacement = random.choice(candidates)
+                        # Be careful not to replace '에' inside the stem if possible, 
+                        # but usually just stripping the suffix is safe for agglutinative chunks.
+                        # Construct: Word minus Josa + New Josa
+                        stem = word[:-len(target_josa)]
+                        new_word = stem + replacement
+                        new_words.append(new_word)
                         changed = True
                     else:
-                        new_text += word
+                        new_words.append(word)
                 else:
-                    new_text += word
-            # If POS tagging splits words (e.g. "학교" "에"), simple concatenation might lose spaces.
-            # Okt often splits. A safer way for Josa is strictly replacing text segments if possible,
-            # but reconstruction from POS is standard.
-            # *Refinement*: Okt.pos returns tokens. We need to reconstruct carefully or use text replacement.
-            # For simplicity in this specialized agent: simple reconstruction.
-            # Note: Okt reconstruction often loses spacing. We will try to preserve it by simple join
-            # but Korean agglutinative nature makes "word + josa" stick together.
-            return new_text if changed else text
-        except:
+                    new_words.append(word)
+            
+            return ' '.join(new_words)
+        except Exception as e:
+            # print(f"Josa Error: {e}")
             return text
 
     def inject_ending_noise(self, text):

@@ -1,83 +1,116 @@
-# Academic Writing Assessment Experiment (CASE Implementation)
+# 📝 한국어 학술 에세이 자동 평가 (AES) 모델 파인튜닝 프로젝트
 
-이 프로젝트는 **CASE (Corruption-based Augmentation Strategy)** 방식을 활용하여 한국어 학술 글쓰기 데이터셋을 구축하고, LLM을 파인튜닝하여 채점 성능을 평가하는 실험입니다.
+본 프로젝트는 **SOLAR-10.7B-Instruct** 모델을 기반으로, 한국어 학술 에세이의 **내용, 구성, 언어** 및 **총점**을 자동으로 평가하는 모델을 구축하기 위한 파인튜닝(LoRA) 파이프라인입니다.
+
+AI Hub의 '주제별 글쓰기 평가 데이터'를 활용하며, 데이터 전처리, 노이즈 주입을 통한 증강(Augmentation), 그리고 Hugging Face Hub를 연동한 학습 및 평가 프로세스를 포함합니다.
 
 ---
 
-## 🚀 빠른 시작 (Quick Start for Server)
+## 📂 프로젝트 구조 (Project Structure)
 
-본 프로젝트는 한국어 학술 논문의 질적 평가를 자동화하기 위해 설계되었습니다. CASE(Corruption-based Augmentation Strategy) 기법을 적용하여 데이터셋을 확장하고, 최신 LLM(SOLAR 등)을 파인튜닝하여 논리적 완결성과 문법적 정확도를 종합적으로 평가하는 모델을 구축합니다.
-
-서버 환경(Ubuntu 등)에서 아래 명령어를 순서대로 실행하면 **환경 설정부터 모델 학습, 평가**까지 한 번에 진행됩니다.
-
-### 1. 저장소 클론 (Clone Repository)
 ```bash
-git clone <GITHUB_REPO_URL>
-cd <REPO_DIRECTORY>
+.
+├── config/
+│   └── config.yaml          # 모델, LoRA, 학습 하이퍼파라미터 설정
+├── data/                    # (로컬) 데이터 저장소 (생성된 jsonl, csv 등)
+├── scripts/                 # 실행용 쉘 스크립트
+│   ├── run_training.sh      # [핵심] 학습 실행 스크립트
+│   └── setup_env.sh         # 가상환경 및 의존성 설치 스크립트
+├── src/                     # 소스 코드
+│   ├── data_gen/            # 데이터 전처리 및 증강
+│   │   ├── convert_dataset.py     # 원본 JSON -> 학습용 JSONL 변환
+│   │   └── generate_from_gold.py  # 만점 에세이 기반 노이즈 주입/증강
+│   ├── train/               # 학습 메인 코드
+│   │   └── train_lora.py          # LoRA 파인튜닝 및 QWK 평가
+│   └── utils/               # 유틸리티
+│       ├── augmentation_utils.py  # 한국어 노이즈 주입기 (Josa, 맞춤법 등)
+│       ├── upload_to_hf.py        # Hugging Face 데이터 업로드
+│       └── inspect_utils.py       # 데이터 검증 툴
+└── aes_finetuned/           # 학습 완료된 모델 및 결과 저장소 (자동 생성)
 ```
 
-### 2. 학습 스크립트 실행 (Run Training)
-Hugging Face에 업로드된 데이터셋을 자동으로 다운로드하여 학습을 시작합니다.
-*(실행 중 Hugging Face 토큰 입력이 필요할 수 있습니다.)*
+---
 
+## 🚀 Quick Start (Ubuntu Server)
+
+서버 환경에서 바로 학습을 시작하는 방법입니다. 데이터는 Hugging Face Hub에서 자동으로 다운로드되므로 별도의 데이터 복사가 필요 없습니다.
+
+### 1. 환경 설정 (최초 1회)
 ```bash
 # 실행 권한 부여
-chmod +x run_server.sh
+chmod +x scripts/*.sh
 
-# 스크립트 실행 (데이터셋 ID 전달)
-./run_server.sh SJunha/aes_dataset
+# 가상환경 생성 및 필수 라이브러리 설치
+./scripts/setup_env.sh
+
+# 가상환경 활성화
+source venv/bin/activate
+```
+
+### 2. 학습 실행
+데이터셋 저장소 ID(예: `SJunha/aes-dataset`)를 인자로 주어 실행합니다.
+```bash
+# 사용법: ./scripts/run_training.sh <HF_DATASET_ID>
+./scripts/run_training.sh SJunha/aes-dataset
+```
+
+학습이 완료되면 `aes_finetuned/` 폴더에 모델 가중치(Adapter)와 평가 결과(`metrics_comparison.png`, `statistical_results.json`)가 저장됩니다.
+
+---
+
+## 🛠️ 데이터 파이프라인 (Data Pipeline)
+
+이 프로젝트는 로컬 데이터를 가공하여 Hugging Face에 업로드하고, 서버에서 이를 받아 학습하는 구조를 권장합니다.
+
+### 1. 데이터 변환 (Raw JSON -> JSONL)
+AI Hub 원본 데이터를 학습 가능한 포맷으로 변환하고, Train/Validation 셋으로 분리합니다.
+```bash
+python src/data_gen/convert_dataset.py
+# 결과물: data/converted_train.jsonl, data/converted_val.jsonl
+```
+
+### 2. 데이터 증강 (Data Augmentation)
+만점(5.0) 에세이에 인위적인 노이즈(조사, 어미, 문장 순서 오류 등)를 주입하여, 낮은 점수대의 데이터를 생성하고 모델의 채점 기준을 견고하게 만듭니다.
+```bash
+# 기본: 모든 만점 에세이에 대해 각 항목별 1회씩 증강
+python src/data_gen/generate_from_gold.py
+
+# 옵션: 증강 배수(Factor) 조절 (예: 에세이당 3개씩 변이 생성)
+python src/data_gen/generate_from_gold.py --aug_factor 3
+```
+
+### 3. Hugging Face 업로드
+생성된 데이터(`train.jsonl`, `validation.jsonl`, `refined_sentences.csv`)를 저장소에 업로드합니다. 저장소가 없으면 자동 생성합니다.
+```bash
+# 공개 저장소로 생성 및 업로드 예시
+python src/utils/upload_to_hf.py SJunha/aes-dataset
 ```
 
 ---
 
-## 📊 결과 확인 (Results)
-학습이 완료되면 `aes_finetuned/` 디렉토리에 다음 결과물이 저장됩니다.
+## 📊 평가 지표 (Evaluation)
 
-1.  **`qwk_comparison.png`**: 모델의 채점 일치도(QWK 점수) 비교 그래프 (Base vs Fine-tuned)
-2.  **`metrics_comparison.png`**: 오차(MSE) 및 QWK 성능 종합 비교 그래프
-3.  **`statistical_results.json`**: 상세 평가 수치 및 로그
-4.  **`adapter_model.safetensors`**: 학습된 LoRA 모델 가중치 파일 (Adapter Weights)
+학습 종료 후, **QWK (Quadratic Weighted Kappa)** 지표를 사용하여 모델 성능을 평가합니다.
+- **QWK**: 두 평가자(사람 vs 모델) 간의 일치도를 측정하는 지표로, 점수 차이가 클수록 더 큰 페널티를 부여합니다. (AES 분야 표준)
+- **비교**: Base 모델(SOLAR-10.7B)과 Fine-tuned 모델의 점수를 비교하여 `aes_finetuned/metrics_comparison.png`에 시각화합니다.
 
 ---
 
-## 🤖 모델 학습 (Model Training: LoRA Fine-tuning)
-생성된 데이터셋을 활용하여 LLM이 학술 에세이를 정교하게 채점할 수 있도록 파인튜닝을 진행합니다.
+## ⚙️ 설정 변경 (Configuration)
 
-### 1. 베이스 모델 (Base Model)
-*   **Model**: `upstage/SOLAR-10.7B-Instruct-v1.0`
-*   **특징**: 한국어와 영어 모두에 뛰어난 성능을 보이는 SOLAR 모델을 활용하여 학술적 문맥 이해도를 극대화합니다.
+학습 하이퍼파라미터(Epoch, Batch Size, Learning Rate 등)는 `config/config.yaml` 파일에서 수정할 수 있습니다.
 
-### 2. 학습 방법 (Training Strategy)
-*   **LoRA (Low-Rank Adaptation)**: 모델 전체를 학습시키는 대신 일부 파라미터(Adapter)만 학습시켜 효율적인 파인튜닝을 수행합니다.
-*   **4-bit Quantization (QLoRA)**: BitsAndBytes를 사용하여 모델을 4비트로 양자화하여 VRAM 사용량을 최적화하고 학습 속도를 높입니다.
-*   **Target Modules**: `q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`, `down_proj` (모든 Linear 레이어 대상)
-
-### 3. 주요 하이퍼파라미터 (Hyperparameters)
-*   **Epochs**: 3
-*   **Batch Size**: 16 (Gradient Accumulation Steps: 4, Effective Batch Size: 64)
-*   **Learning Rate**: 2e-4
-*   **Max Length**: 1024 tokens
-*   **Optimizer**: `paged_adamw_8bit`
-
-### 4. 평가 지표 (Evaluation Metrics)
-학습된 모델의 성능은 Base 모델과 비교하여 다음 지표로 평가됩니다.
-*   **QWK (Quadratic Weighted Kappa)**: 실제 점수와 모델 채점 점수 간의 일치도를 측정하는 지표 (1에 가까울수록 일치)
-*   **MSE (Mean Squared Error)**: 점수 예측의 오차 제곱 평균 (0에 가까울수록 정확)
+```yaml
+training:
+  num_train_epochs: 1
+  per_device_train_batch_size: 4
+  learning_rate: 2e-4
+  # ...
+```
 
 ---
 
-## 🛠 데이터 생성 로직 (Data Generation: CASE)
-이 프로젝트는 **CASE (Corruption-based Augmentation Strategy)** 기법을 통해 고품질의 학습 데이터를 생성합니다. 
-생성된 데이터는 6가지 평가 기준에 맞춰 정교하게 점수가 부여됩니다.
+## 📝 관리자 참고 사항 (Notes for Maintainers)
 
-1.  **Gold Data (Score 5)**: 전문가 수준의 루브릭(Rubric)을 Prompt로 제공하여 Gemini-2.5-Flash 모델이 만점 기준의 학술 에세이를 생성합니다.
-2.  **Corruption Strategy & Mapping**: 생성된 만점 에세이에 의도적인 노이즈를 주입하여, 각 노이즈 유형에 해당하는 평가 항목의 점수를 감점시킵니다.
-
-| 노이즈 유형 (Noise Type) | 적용 방식 (Technique) | 영향 받는 평가 기준 (Impacted Criteria) |
-| :--- | :--- | :--- |
-| **Content Noise** | **Out-of-domain Sentence Injection**<br>논문 주제와 전혀 무관한 문장(Distractor)을 무작위로 삽입하여 글의 맥락과 논리적 흐름을 해침 | • 1. 내용 이해 및 요약<br>• 2. 설득력<br>• 3. 비판적 사고 및 학술적 맥락 파악 |
-| **Organization Noise** | **Sentence Swapping**<br>문장 간의 순서를 무작위로 뒤섞어 글의 구조적 일관성과 전개 논리를 파괴함 | • 4. 구조 및 조직 |
-| **Language Noise** | **Grammar & Format Injection (with Konlpy)**<br>• **Grammar**: 조사(Josa), 어미(Ending), 용언 활용(Conjugation) 오류 주입<br>• **Format**: 맞춤법(Spelling), 띄어쓰기(Spacing) 오류 주입 | • 5. 표현<br>• 6. 형식 |
-
-3.  **Automatic Labeling**: 주입된 노이즈의 비율에 따라 산술적으로 계산된 점수(1~4점)를 정답 라벨(Ground Truth)로 부여하여 대규모 데이터셋을 확보합니다.
-
+*   **데이터셋 스키마**: `train_lora.py`는 `prompt`(주제), `text`(에세이), `content/organization/expression/holistic`(점수) 필드를 자동으로 인식하여 학습 프롬프트를 구성합니다.
+*   **서버 의존성**: `train_lora.py`는 `data/` 폴더가 비어있어도 `args.dataset_name`이 제공되면 Hugging Face에서 데이터를 우선적으로 로드하므로 서버 배포에 용이합니다.

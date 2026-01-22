@@ -13,4 +13,4 @@ pypdf
 python-dotenv
 matplotlib
 scikit-learn
-huggingface_hub
+huggingface_hubPyYAML

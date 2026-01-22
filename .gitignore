@@ -12,6 +12,7 @@ ENV/
 # Project specific outputs (Ignore all generated data)
 outputs/
 *.json
+*.jsonl
 *.csv
 
 # Extracted PDFs (Do not commit raw papers)
@@ -22,4 +23,6 @@ debug_gemini.py
 
 # Gemini CLI configuration
 .geminiignore
+.gemini/*.jsonl
+27.주제별 글쓰기 평가 데이터/
 .gemini/

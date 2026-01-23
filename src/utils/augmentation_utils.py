@@ -187,14 +187,14 @@ class KoreanNoiseInjector:
         applied_errors = []
 
         # 1. Format Noise (High Frequency)
-        if random.random() < 0.75:
+        if random.random() < 0.9:
             target = random.choice(['WS', 'SPELL'])
             if target == 'WS': current_text = self.inject_spacing_error(current_text)
             elif target == 'SPELL': current_text = self.inject_spelling_error(current_text)
             applied_errors.append(target)
 
         # 2. Grammar Noise (Medium Frequency - Critical)
-        if random.random() < 0.5:
+        if random.random() < 0.7:
             target = random.choice(['PART', 'END', 'CONJ', 'WO'])
             if target == 'PART': current_text = self.inject_josa_noise(current_text)
             elif target == 'END': current_text = self.inject_ending_noise(current_text)

@@ -27,7 +27,8 @@ def upload_files(repo_id, token=None, private=False):
     files_to_upload = {
         "data/refined_sentences.csv": "refined_sentences.csv",
         "data/converted_train.jsonl": "train.jsonl",
-        "data/converted_val.jsonl": "validation.jsonl"
+        "data/converted_val.jsonl": "validation.jsonl",
+        "data/paperclinic_generated_dataset.jsonl":"paperclinic_generated_dataset.jsonl"
     }
     
     print(f"Starting upload to {repo_id}...")

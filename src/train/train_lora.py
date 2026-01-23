@@ -17,7 +17,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import re
 from sklearn.metrics import cohen_kappa_score
-from datasets import Dataset
+from datasets import Dataset, concatenate_datasets, load_dataset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -27,6 +27,16 @@ from transformers import (
     BitsAndBytesConfig
 )
 from peft import LoraConfig, get_peft_model, TaskType, prepare_model_for_kbit_training
+
+# ---------------------------------------------------------
+# Argument Parsing
+# ---------------------------------------------------------
+parser = argparse.ArgumentParser(description="Fine-tune SOLAR-10.7B-Instruct with LoRA")
+parser.add_argument("--dataset_name", type=str, default=None, help="Hugging Face dataset ID (e.g., 'username/dataset').")
+parser.add_argument("--experiment_mode", type=str, default="full", 
+                    choices=["zero_shot", "original", "augmented", "full"],
+                    help="Select experiment mode: zero_shot (no train), original (orig only), augmented (orig+aug), full (orig+aug+gen)")
+args, _ = parser.parse_known_args()
 
 # ---------------------------------------------------------
 # Load Configuration
@@ -47,33 +57,15 @@ TRAIN_CFG = config["training"]
 MODEL_ID = MODEL_CFG["base_model"]
 MAX_LENGTH = MODEL_CFG["max_length"]
 
-OUTPUT_DIR = TRAIN_CFG["output_dir"]
-TRAIN_FILE = "data/train.jsonl" # Hardcoded or could be in config
+# Dynamic Output Directory based on Experiment Mode
+OUTPUT_DIR = f"{TRAIN_CFG['output_dir']}_{args.experiment_mode}"
 NUM_EPOCHS = TRAIN_CFG["num_train_epochs"]
 BATCH_SIZE = TRAIN_CFG["per_device_train_batch_size"]
 GRADIENT_ACCUMULATION_STEPS = TRAIN_CFG["gradient_accumulation_steps"]
-LEARNING_RATE = float(TRAIN_CFG["learning_rate"]) # Ensure float
-
-# ---------------------------------------------------------
-# Argument Parsing
-# ---------------------------------------------------------
-parser = argparse.ArgumentParser(description="Fine-tune SOLAR-10.7B-Instruct with LoRA")
-parser.add_argument("--dataset_name", type=str, default=None, help="Hugging Face dataset ID (e.g., 'username/dataset'). If None, uses local train.jsonl")
-args, _ = parser.parse_known_args()
+LEARNING_RATE = float(TRAIN_CFG["learning_rate"])
 
 TRAIN_PATH = "data/converted_train.jsonl"
 VAL_PATH = "data/converted_val.jsonl"
-OLD_TRAIN_FILE = "data/train.jsonl"
-
-def load_local_jsonl(path):
-    if not os.path.exists(path):
-        return None
-    print(f"Loading data from {path}...")
-    data = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            data.append(json.loads(line))
-    return data
 
 def format_chat(example):
     # 1. Handle new format from convert_dataset.py (prompt, text, content, etc.)
@@ -109,55 +101,66 @@ def format_chat(example):
     return messages
 
 def get_datasets():
-    if args.dataset_name:
-        print(f"Loading dataset from Hugging Face Hub: {args.dataset_name}")
-        from datasets import load_dataset
-        ds_dict = load_dataset(args.dataset_name)
-        
-        # Determine splits
-        train_raw = ds_dict["train"]
-        if "validation" in ds_dict:
-            test_raw = ds_dict["validation"]
-        elif "test" in ds_dict:
-            test_raw = ds_dict["test"]
-        else:
-            print("No validation split found. Splitting 10% from train...")
-            split = train_raw.train_test_split(test_size=0.1, seed=42)
-            train_raw, test_raw = split["train"], split["test"]
-        
-        # Apply formatting to HF dataset
-        print("Mapping datasets to SOLAR format...")
-        train_ds = train_raw.map(lambda x: {"messages": format_chat(x)}, remove_columns=train_raw.column_names)
-        test_ds = test_raw.map(lambda x: {"messages": format_chat(x)}, remove_columns=test_raw.column_names)
-        
-        return train_ds, test_ds
+    dataset_name = args.dataset_name if args.dataset_name else "SJunha/aes-dataset"
+    print(f"Loading datasets from Hugging Face Hub: {dataset_name}")
+    print(f"Experiment Mode: {args.experiment_mode}")
     
-    else:
-        # Load local files (Fallback)
-        train_raw = load_local_jsonl(TRAIN_PATH)
-        val_raw = load_local_jsonl(VAL_PATH)
-        
-        # Fallback to old file if new one doesn't exist
-        if train_raw is None:
-            print(f"Warning: {TRAIN_PATH} not found. Trying {OLD_TRAIN_FILE}...")
-            train_raw = load_local_jsonl(OLD_TRAIN_FILE)
-            if train_raw is None:
-                raise FileNotFoundError("No training data found in 'data/' folder.")
+    # 1. Load Original Data (Always needed for Test, and mostly for Train)
+    print("Loading Original Data (Train/Val)...")
+    try:
+        original_ds = load_dataset(dataset_name, data_files={"train": "train.jsonl", "test": "validation.jsonl"})
+        train_ds_1 = original_ds["train"]
+        test_ds = original_ds["test"]
+    except Exception as e:
+        print(f"Error loading original data: {e}")
+        raise e
 
-        # Format and convert to HF Dataset objects
-        train_ds = Dataset.from_list([{"messages": format_chat(d)} for d in train_raw])
-        
-        if val_raw:
-            test_ds = Dataset.from_list([{"messages": format_chat(d)} for d in val_raw])
-        else:
-            print("No validation file found. Splitting 10% from train...")
-            split = train_ds.train_test_split(test_size=0.1, seed=42)
-            train_ds, test_ds = split["train"], split["test"]
-            
-        return train_ds, test_ds
+    if args.experiment_mode == "zero_shot":
+        # Only process test set
+        print("Zero-shot mode: Skipping training data loading.")
+        test_ds = test_ds.map(lambda x: {"messages": format_chat(x)}, remove_columns=test_ds.column_names)
+        return None, test_ds
+
+    processed_train_datasets = []
+
+    # A. Original Data (Included in original, augmented, full)
+    ds1_mapped = train_ds_1.map(lambda x: {"messages": format_chat(x)}, remove_columns=train_ds_1.column_names)
+    processed_train_datasets.append(ds1_mapped)
+    
+    # B. Augmented Data (Included in augmented, full)
+    if args.experiment_mode in ["augmented", "full"]:
+        print("Loading Augmented Data (Gold Augmented)...")
+        try:
+            augmented_ds_dict = load_dataset(dataset_name, "gold_augmented")
+            ds3_mapped = augmented_ds_dict["train"].map(lambda x: {"messages": format_chat(x)}, remove_columns=augmented_ds_dict["train"].column_names)
+            processed_train_datasets.append(ds3_mapped)
+        except Exception as e:
+            print(f"Warning: Could not load augmented data: {e}")
+
+    # C. Generated Data (Included in full only)
+    if args.experiment_mode == "full":
+        print("Loading Generated Data (PaperClinic)...")
+        try:
+            generated_ds_dict = load_dataset(dataset_name, data_files={"train": "paperclinic_generated_dataset.jsonl"})
+            ds2_mapped = generated_ds_dict["train"].map(lambda x: {"messages": format_chat(x)}, remove_columns=generated_ds_dict["train"].column_names)
+            processed_train_datasets.append(ds2_mapped)
+        except Exception as e:
+            print(f"Warning: Could not load generated data: {e}")
+
+    # Process Test
+    test_ds = test_ds.map(lambda x: {"messages": format_chat(x)}, remove_columns=test_ds.column_names)
+
+    # Concatenate
+    print(f"Concatenating {len(processed_train_datasets)} training datasets...")
+    full_train_ds = concatenate_datasets(processed_train_datasets)
+    
+    return full_train_ds, test_ds
 
 train_dataset, test_dataset = get_datasets()
-print(f"Train samples: {len(train_dataset)}, Test samples: {len(test_dataset)}")
+if train_dataset:
+    print(f"Train samples: {len(train_dataset)}, Test samples: {len(test_dataset)}")
+else:
+    print(f"Test samples: {len(test_dataset)} (Zero-shot mode)")
 
 # ---------------------------------------------------------
 # 2. Model & Tokenizer (4-bit Quantization)
@@ -173,9 +176,9 @@ bnb_config = BitsAndBytesConfig(
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 tokenizer.pad_token = tokenizer.eos_token
-tokenizer.padding_side = "right" # Fix for fp16 training stability
+tokenizer.padding_side = "right" 
 
-# Explicitly set chat template for SOLAR if it's missing (Common for this model)
+# Explicitly set chat template for SOLAR if it's missing
 if tokenizer.chat_template is None:
     tokenizer.chat_template = "{% for message in messages %}{% if message['role'] == 'user' %}{{ '### User:\n' + message['content'] + '\n\n' }}{% elif message['role'] == 'assistant' %}{{ '### Assistant:\n' + message['content'] + eos_token }}{% endif %}{% endfor %}"
 
@@ -185,260 +188,194 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="auto",
     trust_remote_code=True
 )
-model.config.pad_token_id = tokenizer.pad_token_id # Explicitly sync pad_token_id
+model.config.pad_token_id = tokenizer.pad_token_id 
 
-# Prepare model for k-bit training (gradient checkpointing, etc.)
+# Prepare model for k-bit training
 model = prepare_model_for_kbit_training(model)
 
 # ---------------------------------------------------------
-# 3. LoRA Configuration
+# 3. LoRA Configuration & Training
 # ---------------------------------------------------------
-peft_config = LoraConfig(
-    task_type=TaskType.CAUSAL_LM,
-    inference_mode=False,
-    r=LORA_CFG["r"],
-    lora_alpha=LORA_CFG["lora_alpha"],
-    lora_dropout=LORA_CFG["lora_dropout"],
-    target_modules=LORA_CFG["target_modules"],
-    bias=LORA_CFG.get("bias", "none")
-)
 
-model = get_peft_model(model, peft_config)
-model.print_trainable_parameters()
-
-# ---------------------------------------------------------
-# 4. Tokenization
-# ---------------------------------------------------------
-def preprocess_function(examples):
-    texts = [tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=False) for msgs in examples["messages"]]
-    model_inputs = tokenizer(
-        texts,
-        max_length=MAX_LENGTH,
-        truncation=True,
-        padding="max_length",
-        return_tensors="pt"
+if args.experiment_mode != "zero_shot":
+    peft_config = LoraConfig(
+        task_type=TaskType.CAUSAL_LM,
+        inference_mode=False,
+        r=LORA_CFG["r"],
+        lora_alpha=LORA_CFG["lora_alpha"],
+        lora_dropout=LORA_CFG["lora_dropout"],
+        target_modules=LORA_CFG["target_modules"],
+        bias=LORA_CFG.get("bias", "none")
     )
-    labels = model_inputs["input_ids"].clone()
-    labels[labels == tokenizer.pad_token_id] = -100
-    model_inputs["labels"] = labels
-    return model_inputs
+    model = get_peft_model(model, peft_config)
+    model.print_trainable_parameters()
 
-print("Tokenizing dataset...")
-tokenized_train = train_dataset.map(preprocess_function, batched=True)
-tokenized_test = test_dataset.map(preprocess_function, batched=True)
+    def preprocess_function(examples):
+        texts = [tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=False) for msgs in examples["messages"]]
+        model_inputs = tokenizer(
+            texts,
+            max_length=MAX_LENGTH,
+            truncation=True,
+            padding="max_length",
+            return_tensors="pt"
+        )
+        labels = model_inputs["input_ids"].clone()
+        labels[labels == tokenizer.pad_token_id] = -100
+        model_inputs["labels"] = labels
+        return model_inputs
 
-# ---------------------------------------------------------
-# 5. Training
-# ---------------------------------------------------------
-training_args = TrainingArguments(
-    output_dir=OUTPUT_DIR,
-    num_train_epochs=NUM_EPOCHS,
-    per_device_train_batch_size=BATCH_SIZE,
-    gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
-    learning_rate=LEARNING_RATE,
-    logging_steps=TRAIN_CFG.get("logging_steps", 100),
-    save_strategy=TRAIN_CFG.get("save_strategy", "epoch"),
-    eval_strategy=TRAIN_CFG.get("evaluation_strategy", "steps"), 
-    eval_steps=200,             
-    fp16=TRAIN_CFG.get("fp16", True),
-    optim=TRAIN_CFG.get("optim", "paged_adamw_8bit"),
-    warmup_ratio=TRAIN_CFG.get("warmup_ratio", 0.03),
-    group_by_length=TRAIN_CFG.get("group_by_length", True),
-    report_to="none"
-)
+    print("Tokenizing dataset...")
+    tokenized_train = train_dataset.map(preprocess_function, batched=True)
+    tokenized_test = test_dataset.map(preprocess_function, batched=True)
 
-trainer = Trainer(
-    model=model,
-    args=training_args,
-    train_dataset=tokenized_train,
-    eval_dataset=tokenized_test,
-    data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
-)
+    training_args = TrainingArguments(
+        output_dir=OUTPUT_DIR,
+        num_train_epochs=NUM_EPOCHS,
+        per_device_train_batch_size=BATCH_SIZE,
+        gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+        learning_rate=LEARNING_RATE,
+        logging_steps=TRAIN_CFG.get("logging_steps", 100),
+        save_strategy=TRAIN_CFG.get("save_strategy", "epoch"),
+        eval_strategy=TRAIN_CFG.get("evaluation_strategy", "steps"), 
+        eval_steps=200,             
+        fp16=TRAIN_CFG.get("fp16", True),
+        optim=TRAIN_CFG.get("optim", "paged_adamw_8bit"),
+        warmup_ratio=TRAIN_CFG.get("warmup_ratio", 0.03),
+        group_by_length=TRAIN_CFG.get("group_by_length", True),
+        report_to="none"
+    )
 
-print("Starting training...")
-trainer.train()
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=tokenized_train,
+        eval_dataset=tokenized_test,
+        data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    )
 
-print(f"Saving model to {OUTPUT_DIR}")
-model.save_pretrained(OUTPUT_DIR)
-tokenizer.save_pretrained(OUTPUT_DIR)
+    print("Starting training...")
+    trainer.train()
 
-# ---------------------------------------------------------
-# 6. Visualization
-# ---------------------------------------------------------
-print("Visualizing training loss...")
-log_history = trainer.state.log_history
-
-steps = []
-losses = []
-
-for log in log_history:
-    if "loss" in log:
-        steps.append(log["step"])
-        losses.append(log["loss"])
-
-if steps:
-    plt.figure(figsize=(10, 6))
-    plt.plot(steps, losses, label="Training Loss")
-    plt.xlabel("Step")
-    plt.ylabel("Loss")
-    plt.title("Training Loss Curve")
-    plt.legend()
-    plt.grid(True)
+    print(f"Saving model to {OUTPUT_DIR}")
+    model.save_pretrained(OUTPUT_DIR)
+    tokenizer.save_pretrained(OUTPUT_DIR)
     
-    plot_path = os.path.join(OUTPUT_DIR, "training_loss.png")
-    plt.savefig(plot_path)
-    print(f"Loss plot saved to {plot_path}")
+    # Save Loss Plot
+    log_history = trainer.state.log_history
+    steps = []
+    losses = []
+    for log in log_history:
+        if "loss" in log:
+            steps.append(log["step"])
+            losses.append(log["loss"])
+    if steps:
+        plt.figure(figsize=(10, 6))
+        plt.plot(steps, losses, label="Training Loss")
+        plt.title(f"Training Loss ({args.experiment_mode})")
+        plt.savefig(os.path.join(OUTPUT_DIR, "training_loss.png"))
+
 else:
-    print("No loss data found in log history.")
+    print("Zero-shot mode: Skipping training process.")
+    # For zero-shot, we still need to setup 'model' for inference, which is already done.
+    # We just don't wrap it in a Trainer or apply LoRA training config (or apply it but don't train).
+    if not os.path.exists(OUTPUT_DIR):
+        os.makedirs(OUTPUT_DIR)
 
 # ---------------------------------------------------------
 # 7. Statistical Evaluation (QWK Analysis)
 # ---------------------------------------------------------
-print("\n=== Starting Statistical Evaluation (Base vs. Fine-tuned) ===")
+print(f"\n=== Starting Statistical Evaluation (Mode: {args.experiment_mode}) ===")
 
-# Select a subset for statistical significance (e.g., 50 samples)
+# Select a subset for statistical significance
 eval_count = min(50, len(test_dataset))
 eval_subset = test_dataset.select(range(eval_count))
 
 results = {
     "true_scores": [],
-    "base_scores": [],
-    "ft_scores": [],
+    "pred_scores": [],
     "details": []
 }
 
 def extract_total_score(text):
-    """
-    Extracts '총점' from the model output. 
-    Tries JSON parsing first, then Regex fallback.
-    """
     try:
-        # Use a non-greedy match to find the first valid JSON-like structure
         match = re.search(r"(.*?)", text, re.DOTALL)
         if match:
             json_str = match.group(0)
-            # Attempt to repair the JSON if it's slightly malformed
             try:
                 data = json.loads(json_str)
                 return float(data.get("총점", data.get("total_score", -1)))
-            except json.JSONDecodeError:
-                # Fallback for cases where the model might have added a trailing comma
-                clean_json_str = re.sub(r",\s*}}", "}", json_str)
-                clean_json_str = re.sub(r",\s*]", "]", clean_json_str)
-                data = json.loads(clean_json_str)
-                return float(data.get("총점", data.get("total_score", -1)))
+            except:
+                pass
     except:
         pass
-    
-    # Regex Fallback
     try:
         match = re.search(r"""['"]총점['"]\s*:\s*([\d\.]+)""", text)
-        if match:
-            return float(match.group(1))
-    except:
-        pass
+        if match: return float(match.group(1))
+    except: pass
     return None
 
 print(f"Evaluating {eval_count} samples for QWK accuracy...")
 
+# Ensure model is in eval mode
+model.eval()
+
 for i, example in enumerate(eval_subset):
-    # Extract from formatted messages
     user_prompt_content = example["messages"][0]["content"]
     ground_truth_content = example["messages"][1]["content"]
     
-    # Get True Score
     true_score = extract_total_score(ground_truth_content)
     if true_score is None: continue 
 
     print(f"  [{i+1}/{eval_count}] Ground Truth: {true_score}")
     
-    # 1. Base Model Prediction
-    with model.disable_adapter():
-        text = tokenizer.apply_chat_template(
-            [{"role": "user", "content": user_prompt_content}], 
-            tokenize=False, 
-            add_generation_prompt=True
-        )
-        model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
-        with torch.no_grad():
-            generated_ids = model.generate(**model_inputs, max_new_tokens=256, temperature=0.1, do_sample=False)
-        generated_ids = [
-            output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
-        ]
-        base_output = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-        base_score = extract_total_score(base_output)
-
-    # 2. Fine-tuned Prediction
+    # Prediction
     text = tokenizer.apply_chat_template(
         [{"role": "user", "content": user_prompt_content}], 
         tokenize=False, 
         add_generation_prompt=True
     )
     model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
+    
     with torch.no_grad():
         generated_ids = model.generate(**model_inputs, max_new_tokens=256, temperature=0.1, do_sample=False)
+    
     generated_ids = [
         output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
     ]
-    ft_output = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-    ft_score = extract_total_score(ft_output)
+    pred_output = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    pred_score = extract_total_score(pred_output)
     
-    # Collect Data
     results["true_scores"].append(true_score)
-    results["base_scores"].append(base_score if base_score is not None else 0.0)
-    results["ft_scores"].append(ft_score if ft_score is not None else 0.0)
+    results["pred_scores"].append(pred_score if pred_score is not None else 0.0)
 
-    print(f"     -> Base Score: {base_score} | FT Score: {ft_score}")
+    print(f"     -> Pred Score: {pred_score}")
     
     results["details"].append({
         "true_score": true_score,
-        "base_output": base_output,
-        "base_score": base_score,
-        "ft_output": ft_output,
-        "ft_score": ft_score
+        "pred_output": pred_output,
+        "pred_score": pred_score
     })
 
 # --- Metrics Calculation ---
-
-# QWK (Quadratic Weighted Kappa)
 def to_int_score(scores):
     return [int(round(max(1.0, min(5.0, s)))) for s in scores]
 
 true_int = to_int_score(results["true_scores"])
-base_int = to_int_score(results["base_scores"])
-ft_int = to_int_score(results["ft_scores"])
+pred_int = to_int_score(results["pred_scores"])
 
-qwk_base = cohen_kappa_score(true_int, base_int, weights='quadratic')
-qwk_ft = cohen_kappa_score(true_int, ft_int, weights='quadratic')
+qwk = cohen_kappa_score(true_int, pred_int, weights='quadratic')
 
-print(f"\nResults Summary:")
-print(f"  Base Model -> QWK: {qwk_base:.4f}")
-print(f"  Fine-tuned -> QWK: {qwk_ft:.4f}")
+print(f"\nResults Summary ({args.experiment_mode}):")
+print(f"  QWK: {qwk:.4f}")
 
 # Save JSON Results
 final_results = {
-    "metrics": {
-        "qwk_base": qwk_base, "qwk_ft": qwk_ft
-    },
+    "mode": args.experiment_mode,
+    "metrics": {"qwk": qwk},
     "details": results["details"]
 }
 
 with open(os.path.join(OUTPUT_DIR, "statistical_results.json"), "w", encoding="utf-8") as f:
     json.dump(final_results, f, ensure_ascii=False, indent=2)
 
-# Plot QWK Metrics Comparison
-plt.figure(figsize=(8, 6))
-models = ['Base', 'Fine-tuned']
-qwks = [qwk_base, qwk_ft]
-plt.bar(models, qwks, color=['gray', 'orange'])
-plt.title('QWK Score Comparison (Higher is Better)')
-plt.ylabel('Quadratic Weighted Kappa')
-plt.ylim(-0.1, 1.1)
-for i, v in enumerate(qwks):
-    plt.text(i, v + 0.02, f"{v:.4f}", ha='center', va='bottom')
-
-plot_path = os.path.join(OUTPUT_DIR, "qwk_comparison.png")
-plt.savefig(plot_path)
-print(f"QWK Metrics Plot saved to {plot_path}")
-
-print("Done! Download the folder to check 'qwk_comparison.png'.")
+print(f"Evaluation complete. Results saved to {OUTPUT_DIR}")

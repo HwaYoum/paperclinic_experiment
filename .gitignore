@@ -11,18 +11,27 @@ ENV/
 
 # Project specific outputs (Ignore all generated data)
 outputs/
+aes_finetuned/
+aes_pilot_results/
 *.json
 *.jsonl
 *.csv
+*.png
 
-# Extracted PDFs (Do not commit raw papers)
-archive/papers/
-
-# Debug scripts
-debug_gemini.py
+# Data folder rules
+# Keep the directory structure but ignore contents
+data/*
+!data/papers/
+data/papers/*
+!.gitkeep
 
 # Gemini CLI configuration
 .geminiignore
-.gemini/*.jsonl
-27.주제별 글쓰기 평가 데이터/
 .gemini/
+.DS_Store
+
+# Large Data Folder from AI Hub
+27.주제별 글쓰기 평가 데이터/
+
+# Debug scripts
+debug_*.py

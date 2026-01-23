@@ -10,6 +10,8 @@ import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
 from src.utils.augmentation_utils import KoreanNoiseInjector
+from datasets import Dataset
+from huggingface_hub import login
 
 # Load environment variables and configure Gemini
 load_dotenv()
@@ -39,21 +41,19 @@ RUBRIC = {
         5: "도입–전개–결론 구조를 명확히 구성하고, 정보를 논문 흐름에 따라 논리적으로 배열하며, 단락 간 관계를 부드럽게 연결한다. 전환 표현을 적절히 사용해 글 전체가 매우 일관적이다."
     },
     "3. 언어": {
-        1: "문장 구조에 심각한 오류가 있으며, 어휘 사용이 부적절해 의미 파악이 어렵다. 표현이 비일관·비논리적이다.",
-        2: "문장이 어색하거나 불완전해 의미 전달이 자주 흐려진다. 어휘 선택이 부정확하며 학술적 글쓰기 스타일과 부적합한 표현이 많다.",
-        3: "문장 구성은 기본적으로 이해 가능하나 모호하거나 단순한 표현이 반복된다. 학술적 문체가 부분적으로 흔들린다.",
-        4: "문장을 대체로 명확히 작성하고 어휘 사용이 대부분 적절하다. 표현은 자연스럽지만 일부 문장에서 경미한 어색함이 있을 수 있다.",
-        5: "문장을 정확히 구성하고 다양한 구조를 자연스럽게 활용하며, 학술적 어조를 일관되게 유지한다. 어휘를 정밀하게 선택해 의미를 선명하게 전달한다."
+        1: "규범 오류가 매우 많아 글의 이해가 어렵고, 인용·참고문헌이 없거나 전혀 형식 미준수 상태이다. 과제 수행 형식을 거의 따르지 않는다.",
+        2: "규범 오류가 빈번하며 인용·참고문헌이 불완전·누락 상태다. 분량·형식 요건을 충족하지 못한다.",
+        3: "규범 오류가 다수 보이나 의미 전달에는 큰 지장을 주지 않는다. 인용·참고문헌에 불일치나 누락이 있다. 분량·형식 요건을 부분적으로 준수한다.",
+        4: "대부분 정확히 사용하며 소수의 경미한 오류만 보인다. 인용·참고문헌 형식도 대체로 정확하다. 분량·형식 요건을 대체로 준수한다.",
+        5: "맞춤법·띄어쓰기·문장부호를 정확히 적용하고 오류가 거의 없다. 인용·참고문헌을 요구 형식에 맞춰 작성하며, 분량 및 형식 요건을 모두 충족한다."
     }
 }
 
 def clean_text(text: str) -> str:
     """Removes special characters except periods, commas, and quotes."""
     # Keep Korean, English, numbers, whitespace, and . , ' "
-    text = re.sub(r'[^가-힣a-zA-Z0-9\s.,\'"]', ' ', text)
-    # Normalize whitespace
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
+    text = re.sub(r'[^가-힣a-zA-Z0-9\s.,\'"]', '', text)
+    return text
 
 def get_gemini_response(prompt: str, model_name: str = "gemini-2.5-flash") -> str:
     try:
@@ -357,6 +357,22 @@ def main():
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     print(f"Done. Saved {len(output_dataset)} entries to {output_file}")
+
+    # Upload to Hugging Face
+    hf_token = os.getenv("HF_TOKEN")
+    if hf_token:
+        print("Logging in to Hugging Face...")
+        # login(token=hf_token)
+        
+        print("Uploading to Hugging Face Hub (SJunha/aes-dataset)...")
+        try:
+            ds = Dataset.from_list(output_dataset)
+            ds.push_to_hub("SJunha/aes-dataset", config_name="gold_augmented", split="train")
+            print("Successfully uploaded to SJunha/aes-dataset (config: gold_augmented)!")
+        except Exception as e:
+            print(f"Upload failed: {e}")
+    else:
+        print("HF_TOKEN not found. Skipping upload to Hugging Face.")
 
 if __name__ == "__main__":
     main()

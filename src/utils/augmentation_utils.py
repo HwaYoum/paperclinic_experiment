@@ -184,27 +184,29 @@ class KoreanNoiseInjector:
         - 50% chance for Grammar errors (PART, END, CONJ, WO)
         """
         current_text = text
-        applied_errors = []
 
-        # 1. Format Noise (High Frequency)
-        if random.random() < 0.9:
-            target = random.choice(['WS', 'SPELL'])
-            if target == 'WS': current_text = self.inject_spacing_error(current_text)
-            elif target == 'SPELL': current_text = self.inject_spelling_error(current_text)
-            applied_errors.append(target)
+        for _ in range(7):
+            applied_errors = []
 
-        # 2. Grammar Noise (Medium Frequency - Critical)
-        if random.random() < 0.7:
-            target = random.choice(['PART', 'END', 'CONJ', 'WO'])
-            if target == 'PART': current_text = self.inject_josa_noise(current_text)
-            elif target == 'END': current_text = self.inject_ending_noise(current_text)
-            elif target == 'CONJ': current_text = self.inject_conjugation_error(current_text)
-            elif target == 'WO': current_text = self.inject_word_order_error(current_text)
-            applied_errors.append(target)
+            # 1. Format Noise (High Frequency)
+            if random.random() < 0.9:
+                target = random.choice(['WS', 'SPELL'])
+                if target == 'WS': current_text = self.inject_spacing_error(current_text)
+                elif target == 'SPELL': current_text = self.inject_spelling_error(current_text)
+                applied_errors.append(target)
 
-        # Ensure at least one error if it was a "clean" pass (optional, but good for data generation)
-        if not applied_errors:
-            # Force one low-level error
-            current_text = self.inject_spacing_error(current_text)
+            # 2. Grammar Noise (Medium Frequency - Critical)
+            if random.random() < 0.7:
+                target = random.choice(['PART', 'END', 'CONJ', 'WO'])
+                if target == 'PART': current_text = self.inject_josa_noise(current_text)
+                elif target == 'END': current_text = self.inject_ending_noise(current_text)
+                elif target == 'CONJ': current_text = self.inject_conjugation_error(current_text)
+                elif target == 'WO': current_text = self.inject_word_order_error(current_text)
+                applied_errors.append(target)
+
+            # Ensure at least one error if it was a "clean" pass (optional, but good for data generation)
+            if not applied_errors:
+                # Force one low-level error
+                current_text = self.inject_spacing_error(current_text)
             
         return current_text

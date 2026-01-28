@@ -257,14 +257,14 @@ dict_consistency_average = {
 def generate_candidates(base_text: str, noise_type: str, target_score: float, distractor_pool: List[str], count: int = 5) -> List[Tuple[str, float, Dict]]:
     candidates = []
     noise_map = {
-        4.0 : 4.5,
+        4.0 : 4.0,
         3.0 : 3.0,
         2.0 : 2.0,
         1.0 : 1.0
     }
     fixed_noise_param = noise_map[target_score]
     
-    for _ in range(count):
+    for _ in range(count): 
         noisy_text, _, noise_log = apply_case_noise(base_text, noise_type, fixed_noise_param, distractor_pool)
         candidates.append((noisy_text, target_score, noise_log))
     

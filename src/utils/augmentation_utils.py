@@ -182,31 +182,55 @@ class KoreanNoiseInjector:
         Applies noise based on the 'Roulette' strategy:
         - 75% chance for Format errors (WS, SPELL)
         - 50% chance for Grammar errors (PART, END, CONJ, WO)
+        Returns (noisy_text, details) where details is {error_type: count}.
         """
         current_text = text
+        details = {}
 
+        # I'm reducing the range to 1 because 7 seems overkill and likely a mistake in original code
+        # However, to maintain original "aggressive" behavior if it was intended, I will keep it,
+        # but honestly 7 passes with these probabilities means almost guaranteed destruction.
+        # Given "noise_ratio" in V2 is controlled by 'n_sc' (number of sentences to corrupt),
+        # maybe we want the corrupted sentence to be VERY corrupted? 
+        # I'll stick to the original loop count but track properly.
+        
         for _ in range(7):
             applied_errors = []
 
             # 1. Format Noise (High Frequency)
             if random.random() < 0.9:
                 target = random.choice(['WS', 'SPELL'])
-                if target == 'WS': current_text = self.inject_spacing_error(current_text)
-                elif target == 'SPELL': current_text = self.inject_spelling_error(current_text)
-                applied_errors.append(target)
+                temp_text = current_text
+                if target == 'WS': temp_text = self.inject_spacing_error(current_text)
+                elif target == 'SPELL': temp_text = self.inject_spelling_error(current_text)
+                
+                if temp_text != current_text:
+                    current_text = temp_text
+                    details[target] = details.get(target, 0) + 1
+                    applied_errors.append(target)
 
             # 2. Grammar Noise (Medium Frequency - Critical)
             if random.random() < 0.7:
                 target = random.choice(['PART', 'END', 'CONJ', 'WO'])
-                if target == 'PART': current_text = self.inject_josa_noise(current_text)
-                elif target == 'END': current_text = self.inject_ending_noise(current_text)
-                elif target == 'CONJ': current_text = self.inject_conjugation_error(current_text)
-                elif target == 'WO': current_text = self.inject_word_order_error(current_text)
-                applied_errors.append(target)
+                temp_text = current_text
+                if target == 'PART': temp_text = self.inject_josa_noise(current_text)
+                elif target == 'END': temp_text = self.inject_ending_noise(current_text)
+                elif target == 'CONJ': temp_text = self.inject_conjugation_error(current_text)
+                elif target == 'WO': temp_text = self.inject_word_order_error(current_text)
+                
+                if temp_text != current_text:
+                    current_text = temp_text
+                    details[target] = details.get(target, 0) + 1
+                    applied_errors.append(target)
 
-            # Ensure at least one error if it was a "clean" pass (optional, but good for data generation)
+            # Ensure at least one error if it was a "clean" pass but we are in a loop... 
+            # Original code said: if not applied_errors: force one.
+            # This logic inside a loop of 7 means if randoms fail, we force.
+            # So we get A LOT of noise.
             if not applied_errors:
-                # Force one low-level error
-                current_text = self.inject_spacing_error(current_text)
+                temp_text = self.inject_spacing_error(current_text)
+                if temp_text != current_text:
+                    current_text = temp_text
+                    details['WS'] = details.get('WS', 0) + 1
             
-        return current_text
+        return current_text, details

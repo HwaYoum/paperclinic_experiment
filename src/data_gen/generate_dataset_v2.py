@@ -11,6 +11,9 @@ import google.generativeai as genai
 from datasets import Dataset
 from huggingface_hub import login
 import sys
+import concurrent.futures
+import threading
+from datetime import datetime
 
 # Ensure project root is in path for imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
@@ -28,6 +31,9 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 
 # Initialize Noise Injector
 noise_injector = KoreanNoiseInjector()
+
+# Initialize Lock for thread safety
+stats_lock = threading.Lock()
 
 # Rubric Definition
 RUBRIC = {
@@ -85,13 +91,28 @@ def extract_pdf_context(pdf_path: str, max_pages: int = 5) -> str: ## 실제로 
         return ""
 
 def get_gemini_response(prompt: str, model_name: str = "gemini-2.5-flash") -> str:
-    try:
-        model = genai.GenerativeModel(model_name)
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        print(f"Gemini API Error: {e}")
-        return ""
+    max_retries = 5
+    base_delay = 1
+    
+    for attempt in range(max_retries):
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            # Check for rate limit or quota errors
+            error_str = str(e).lower()
+            if "429" in error_str or "quota" in error_str or "resource" in error_str:
+                sleep_time = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                print(f"API Rate limit hit. Retrying in {sleep_time:.2f}s... (Attempt {attempt+1}/{max_retries})")
+                time.sleep(sleep_time)
+            else:
+                print(f"Gemini API Error: {e}")
+                # For other errors, we might still want to retry briefly or fail
+                time.sleep(1)
+    
+    print("Max retries reached for Gemini API.")
+    return ""
 
 def split_sentences(text: str) -> List[str]:
     chunks = re.split(r'(?<=[.?!])\s+', text)
@@ -141,8 +162,8 @@ def evaluate_essay(text: str, target_trait: str, target_score: float) -> Dict[st
         [출력 형식]:
         반드시 아래 JSON 형식으로만 응답하십시오.다른 말은 포함하지 마세요.
         {{
-            "analysis": "에세이의 특징과 루브릭 기준을 대조한 상세 분석 (1~2문장)",
-            "alignment_score": "루브릭 일치도 점수 (0.00~100.00, 소수점 둘째 자리)"
+            "reasoning": "에세이의 특징과 루브릭 기준을 대조한 상세 분석 (1~2문장)",
+            "consistency_score": "루브릭 일치도 점수 (0.00~100.00, 소수점 둘째 자리)"
         }}
         """
 
@@ -157,8 +178,8 @@ def evaluate_essay(text: str, target_trait: str, target_score: float) -> Dict[st
         if match:
             json_str = match.group(0)
             result = json.loads(json_str)
-            if "alignment_score" in result:
-                result["alignment_score"] = float(result["alignment_score"])
+            if "consistency_score" in result:
+                result["consistency_score"] = float(result["consistency_score"])
             return result
     except:
         pass
@@ -166,15 +187,25 @@ def evaluate_essay(text: str, target_trait: str, target_score: float) -> Dict[st
     print("try part error")
     return None
 
-def apply_case_noise(text: str, noise_type: str, target_score: float, distractor_pool: List[str]) -> Tuple[str, float]:
+def apply_case_noise(text: str, noise_type: str, target_score: float, distractor_pool: List[str]) -> Tuple[str, float, Dict[str, Any]]:
     sentences = split_sentences(text)
     n_se = len(sentences)
-    if n_se == 0: return text, 5.0
+    noise_log = {
+        "noise_ratio": 0.0,
+        "noise_content_indices": [],
+        "noise_organization_swaps": [],
+        "noise_language_details": []
+    }
 
-    n_sc = int(round(n_se * (5.0 - target_score) / 5.0))
+    if n_se == 0: return text, 5.0, noise_log
+
+    n_ratio = (5.0 - target_score) / 5.0
+    n_sc = int(round(n_se * n_ratio))
     n_sc = min(n_sc, n_se)
     
-    if n_sc == 0: return text, 5.0
+    noise_log["noise_ratio"] = n_ratio
+
+    if n_sc == 0: return text, 5.0, noise_log
 
     noisy_sentences = sentences[:]
 
@@ -182,23 +213,35 @@ def apply_case_noise(text: str, noise_type: str, target_score: float, distractor
         indices_to_replace = random.sample(range(n_se), n_sc)
         for idx in indices_to_replace:
             noisy_sentences[idx] = random.choice(distractor_pool)
+        noise_log["noise_content_indices"] = indices_to_replace
 
     elif noise_type == "Organization":
+        swaps = []
         for _ in range(n_sc):
             idx1, idx2 = random.sample(range(n_se), 2)       
             noisy_sentences[idx1], noisy_sentences[idx2] = noisy_sentences[idx2], noisy_sentences[idx1]
-        # indices = random.sample(range(n_se), n_sc)
-        # selected_sentences = [noisy_sentences[i] for i in indices]
-        # random.shuffle(selected_sentences)
-        # for i, idx in enumerate(indices):
-        #     noisy_sentences[idx] = selected_sentences[i]
+            swaps.append((idx1, idx2))
+        noise_log["noise_organization_swaps"] = swaps
 
     elif noise_type == "Language":
         indices_to_corrupt = random.sample(range(n_se), n_sc)
+        details_list = []
         for idx in indices_to_corrupt:
-            noisy_sentences[idx] = noise_injector.apply_weighted_noise(noisy_sentences[idx])
+            original = noisy_sentences[idx]
+            # Returns (text, dict_of_errors)
+            changed, noise_counts = noise_injector.apply_weighted_noise(original)
+            noisy_sentences[idx] = changed
+            
+            details_list.append({
+                "index": idx,
+                "original": original,
+                "injected_sentence": changed,
+                "noise_types": noise_counts
+            })
+            
+        noise_log["noise_language_details"] = details_list
     
-    return ' '.join(noisy_sentences), target_score 
+    return ' '.join(noisy_sentences), target_score, noise_log
 
 dict_cnt = {
     "Language": {1:0, 2:0, 3:0, 4:0},
@@ -211,70 +254,51 @@ dict_consistency_average = {
     "Content": {1:0, 2:0, 3:0, 4:0}
 }
 
-def generate_validated_noisy_essay( ## 데이터 생성 및 검증 과정
-    base_text: str, 
-    noise_type: str, 
-    target_score: float, 
-    distractor_pool: List[str], 
-    max_retries: int = 5
-) -> Tuple[str, str, float]:
-    trait_map = {"Language": "3. 언어", "Organization": "2. 구성", "Content": "1. 내용"}
-    target_trait = trait_map[noise_type]
-    
-    
-    global dict_cnt
-    global dict_consistency_average
-
+def generate_candidates(base_text: str, noise_type: str, target_score: float, distractor_pool: List[str], count: int = 5) -> List[Tuple[str, float, Dict]]:
     candidates = []
-
     noise_map = {
-        4.0 : 4.0,
+        4.0 : 4.5,
         3.0 : 3.0,
         2.0 : 2.0,
         1.0 : 1.0
     }
     fixed_noise_param = noise_map[target_score]
-
-
-
-         
-
-
-    # Generate 5 candidates
-    for i in range(5): 
-        # Apply noise
-        noisy_text, _ = apply_case_noise(base_text, noise_type, fixed_noise_param, distractor_pool)
-
-        # Evaluate
-        eval_result = evaluate_essay(noisy_text, target_trait, target_score)
-        
-        if eval_result:
-            consistency = eval_result.get("alignment_score", 0.0)
-            reasoning = eval_result.get("analysis", "")
-            
-            candidates.append((noisy_text, reasoning, consistency))
-            print(f"[{noise_type} {target_score}] Iter {i+1}: Consistency {consistency}")
-
-    # Select best
-    if candidates:
-        # Sort by consistency descending
-        candidates.sort(key=lambda x: x[2], reverse=True)
-        best_candidate = candidates[0]
-        
-        best_text, best_r, best_c = best_candidate
-        
-        # Update stats
-        dict_consistency_average[noise_type][int(target_score)] += best_c
-        dict_cnt[noise_type][int(target_score)] += 1
-        
-        print(f"      => Best Consistency: {best_c}")
-        return best_text, best_r, best_c
     
-    else:
-        # Fallback
-        print("  => All evaluations failed. Returning blind noise.")
-        blind_noise, _ = apply_case_noise(base_text, noise_type, fixed_noise_param, distractor_pool)
-        return blind_noise, "Evaluation failed", 0.0
+    for _ in range(count):
+        noisy_text, _, noise_log = apply_case_noise(base_text, noise_type, fixed_noise_param, distractor_pool)
+        candidates.append((noisy_text, target_score, noise_log))
+    
+    return candidates
+
+def evaluate_single_candidate(candidate_info: Dict[str, Any]) -> Dict[str, Any]:
+    # candidate_info should contain: text, noise_type, target_score, index, noise_log
+    text = candidate_info['text']
+    noise_type = candidate_info['noise_type']
+    target_score = candidate_info['target_score']
+    noise_log = candidate_info['noise_log']
+    
+    trait_map = {"Language": "3. 언어", "Organization": "2. 구성", "Content": "1. 내용"}
+    target_trait = trait_map[noise_type]
+    
+    eval_result = evaluate_essay(text, target_trait, target_score)
+    
+    result_data = {
+        "text": text,
+        "noise_type": noise_type,
+        "target_score": target_score,
+        "consistency": 0.0,
+        "reasoning": "",
+        "valid": False,
+        "noise_log": noise_log
+    }
+    
+    if eval_result:
+        result_data["consistency"] = eval_result.get("consistency_score", 0.0)
+        result_data["reasoning"] = eval_result.get("reasoning", "")
+        result_data["valid"] = True
+    
+    print(f"[{noise_type} {target_score}] Consistency {result_data['consistency']}")
+    return result_data
 
 # --- Main Generator ---
 
@@ -290,8 +314,21 @@ def main():
     print(f"Found {len(pdf_files)} papers. Starting generation...")
     distractor_pool = get_distractor_sentences()
     
-    output_dataset = []
-    common_instruction = "다음 학술 에세이를 읽고, 평가 기준(내용, 구성, 언어)에 따라 채점한 뒤 결과를 JSON 형식으로 출력하세요." #이거 장식용인데 음..
+    # Metadata construction
+    metadata = {
+        "generator_model": "gemini-2.5-flash",
+        "evaluator_model": "gemini-2.5-flash",
+        "evaluation_method": "First, generate baseline data with perfect scores (5 points) across all evaluation traits. Subsequently, derive data for scores ranging from 4 down to 1 by injecting targeted noise mapped to each specific trait. During the generation phase, produce five candidates for each score level and employ an LLM to select the sample that demonstrates the highest alignment with the rubric descriptions.",
+        "noise_method": "Content: Insertion of irrelevant sentences; Organization: Rearrangement of sentence order; Language: Induction of grammatical errors.",
+        "Types of Language Errors": "spacing(WS), spelling(SPELL), josa(PART), ending(END), conjugation(CONJ), word order(WO)",
+        "generation_prompt": """당신은 해당 분야의 전문가입니다. 아래 논문의 내용을 바탕으로, 질문에 대해 학술적 글쓰기 기준(내용, 구성, 언어)에서 만점(5점)을 받을 수 있는 완벽한 에세이를 작성하세요. [논문 텍스트]: {context} [질문]: {question} [조건]: - 한국어로 작성할 것. - 논문의 핵심 요소(연구 목적·개념·방법·결과·의의)를 정확히 식별하고, 중요 정보를 선별하며, 불필요한 내용을 배제하고, 원문 의미를 왜곡 없이 재구성하여 완성도 높은 요약을 제시한다. - 도입–전개–결론 구조를 명확히 구성하고, 정보를 논문 흐름에 따라 논리적으로 배열하며, 단락 간 관계를 부드럽게 연결한다. 전환 표현을 적절히 사용해 글 전체가 매우 일관적이다. - 문장을 정확히 구성하고 다양한 구조를 자연스럽게 활용하며, 학술적 어조를 일관되게 유지한다. 어휘를 정밀하게 선택해 의미를 선명하게 전달한다. - 10~15 문장 내외.""",
+        "evaluation_prompt": """당신은 엄격한 학술 에세이 평가 전문가입니다. 당신의 임무는 [에세이]가 주어진 [특정 등급 루브릭]에 얼마나 완벽하게 부합(Matching)하는지 '부합도'를 산출하는 것입니다. [지침]: 1. 오직 제공된 [특정 등급 루브릭]의 내용만을 기준으로 판단하십시오. 2. '부합도 점수'가 100점에 가까울수록 해당 루브릭의 설명과 에세이의 상태가 '완벽히 일치'함을 의미합니다. [특정 등급 루브릭]: {target_trait} {target_score}점 기준: {rubric_text} [에세이]: {text} [출력 형식]: 반드시 아래 JSON 형식으로만 응답하십시오.다른 말은 포함하지 마세요. { "reasoning": "에세이의 특징과 루브릭 기준을 대조한 상세 분석 (1~2문장)", "consistency_score": "루브릭 일치도 점수 (0.00~100.00, 소수점 둘째 자리)" }""",
+        "rubric": RUBRIC,
+        "question":ESSAY_QUESTIONS
+    }
+    
+    output_datas = []
+    common_instruction = "다음 학술 에세이를 읽고, 평가 기준(내용, 구성, 언어)에 따라 채점한 뒤 결과를 JSON 형식으로 출력하세요." 
 
     for pdf_path in pdf_files:
         paper_title = os.path.basename(pdf_path)
@@ -331,46 +368,130 @@ def main():
             gold_text = clean_text(gold_text)
 
             # Add Gold Sample
-            output_dataset.append({
+            output_datas.append({
                 "instruction": common_instruction,
                 "filename": os.path.basename(pdf_path),
                 "question": question,
                 "input": gold_text,
-                "output": json.dumps({"1. 내용": 5.0, "2. 구성": 5.0, "3. 언어": 5.0, "총점": 5.0}, ensure_ascii=False)
+                "output": json.dumps({"1. 내용": 5.0, "2. 구성": 5.0, "3. 언어": 5.0, "총점": 5.0}, ensure_ascii=False),
+                "timestamp": datetime.now().isoformat(),
+                "noise_ratio": 0.0,
+                "noise_content_indices": [],
+                "noise_organization_swaps": [],
+                "noise_language_details": []
             })
             
-            # 2. Generate Noisy Variations (Scores 1-4)
+            # 2. Generate Noisy Variations
+            # We want to process tasks in batches of 2 (2 * 5 candidates = 10 parallel calls)
+            # Define all tasks in the desired order
+            noise_types = ["Organization", "Language", "Content"]
             target_scores = [4.0, 3.0, 2.0, 1.0]
-            noise_types = [ "Organization","Language", "Content"]
             
+            # Create list of tasks
+            all_tasks = []
             for n_type in noise_types:
                 for score in target_scores:
-                    # print(f"    Generating {n_type} score {score}...")
-                    noisy_text, reasoning, consistency = generate_validated_noisy_essay(gold_text, n_type, score, distractor_pool)
+                    all_tasks.append((n_type, score))
+            
+            # Process in chunks of 2 tasks
+            chunk_size = 3
+            
+            for i in range(0, len(all_tasks), chunk_size):
+                tasks_chunk = all_tasks[i : i + chunk_size]
+                
+                # Prepare candidates for this chunk (should be 10 total candidates)
+                candidates_to_evaluate = []
+                
+                for n_type, score in tasks_chunk:
+                    generated_candidates = generate_candidates(gold_text, n_type, score, distractor_pool, count=5)
+                    for text, _, noise_log in generated_candidates:
+                        candidates_to_evaluate.append({
+                            "text": text,
+                            "noise_type": n_type,
+                            "target_score": score,
+                            "noise_log": noise_log
+                        })
+                
+                print(f"    Processing batch {i//chunk_size + 1}: {len(candidates_to_evaluate)} evaluations...")
+                
+                # Run evaluations in parallel
+                results = []
+                with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                    futures = [executor.submit(evaluate_single_candidate, c) for c in candidates_to_evaluate]
+                    for future in concurrent.futures.as_completed(futures):
+                        try:
+                            res = future.result()
+                            results.append(res)
+                        except Exception as e:
+                            print(f"Error in parallel execution: {e}")
+                
+                # Group results by task (noise_type, score) to select the best for each task
+                grouped_results = {}
+                for task in tasks_chunk:
+                    grouped_results[task] = []
+                
+                for res in results:
+                    key = (res['noise_type'], res['target_score'])
+                    if key in grouped_results:
+                        grouped_results[key].append(res)
+                
+                # Process each task in order (Task A then Task B)
+                for n_type, score in tasks_chunk:
+                    task_candidates = grouped_results[(n_type, score)]
+                    
+                    if not task_candidates:
+                        print(f"      No results for {n_type} {score}")
+                        continue
+                        
+                    # Sort by consistency descending
+                    task_candidates.sort(key=lambda x: x['consistency'], reverse=True)
+                    best = task_candidates[0]
+                    
+                    best_text = best['text']
+                    best_reasoning = best['reasoning']
+                    best_consistency = best['consistency']
+                    best_log = best['noise_log']
+                    
+                    # Update stats
+                    with stats_lock:
+                        dict_consistency_average[n_type][int(score)] += best_consistency
+                        dict_cnt[n_type][int(score)] += 1
+                    
+                    print(f"      [{n_type} {score}] Best Consistency: {best_consistency}")
                     
                     scores = {"1. 내용": 5.0, "2. 구성": 5.0, "3. 언어": 5.0}
                     if n_type == "Language": scores["3. 언어"] = float(score)
                     elif n_type == "Organization": scores["2. 구성"] = float(score)
                     elif n_type == "Content": scores["1. 내용"] = float(score)
                     
-                    scores["총점"] = sum(scores.values()) / 3.0
+                    scores["총점"] = round(sum(scores.values()) / 3.0,2)
                     
-                    output_dataset.append({
+                    output_datas.append({
                         "instruction": common_instruction,
                         "filename": os.path.basename(pdf_path),
                         "question": question,
-                        "input": clean_text(noisy_text),
+                        "input": clean_text(best_text),
                         "output": json.dumps(scores, ensure_ascii=False),
-                        "reasoning": reasoning,
-                        "consistency_score": consistency
+                        "reasoning": best_reasoning,
+                        "consistency_score": best_consistency,
+                        "timestamp": datetime.now().isoformat(),
+                        "noise_ratio": best_log["noise_ratio"],
+                        "noise_content_indices": best_log["noise_content_indices"],
+                        "noise_organization_swaps": best_log["noise_organization_swaps"],
+                        "noise_language_details": best_log["noise_language_details"]
                     })
 
     # Save Locally
-    output_file = "data/paperclinic_generated_dataset.jsonl"
+    output_file = "data/paperclinic_generated_dataset.json" # changed extension to json
+    final_output = {
+        "metadata": metadata,
+        "datas": output_datas
+    }
+    
     with open(output_file, "w", encoding="utf-8") as f:
-        for entry in output_dataset:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    print(f"\nSaved {len(output_dataset)} samples to {output_file}")
+        json.dump(final_output, f, ensure_ascii=False, indent=2)
+
+    print(f"\nSaved {len(output_datas)} samples to {output_file}")
     
     end_time = time.time()
     elapsed_time = end_time - start_time
@@ -393,18 +514,6 @@ def main():
     print("-" * 50)
     print(df_stats.to_string(index=False))
     print("="*50 + "\n")
-
-    # # Upload to HF
-    # if HF_TOKEN:
-    #     print("Uploading to Hugging Face (SJunha/aes-dataset)...")
-    #     try:
-    #         ds = Dataset.from_list(output_dataset)
-    #         ds.push_to_hub("SJunha/aes-dataset", config_name="paperclinic_generated_dataset", split="train")
-    #         print("Upload Successful! Config: paperclinic_generated_dataset")
-    #     except Exception as e:
-    #         print(f"Upload failed: {e}")
-    # else:
-    #     print("HF_TOKEN missing. Skipping upload.")
 
 if __name__ == "__main__":
     main()

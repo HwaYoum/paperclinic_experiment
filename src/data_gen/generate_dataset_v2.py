@@ -174,7 +174,7 @@ def evaluate_essay(text: str, target_trait: str, target_score: float) -> Dict[st
     
     try:
         clean_response = response_text.replace("```json", "").replace("```", "").strip()
-        match = re.search(r"\{.*\}", clean_response, re.DOTALL)
+        match = re.search(r"\{{.*\}}", clean_response, re.DOTALL)
         if match:
             json_str = match.group(0)
             result = json.loads(json_str)
@@ -320,15 +320,21 @@ def main():
         "evaluator_model": "gemini-2.5-flash",
         "evaluation_method": "First, generate baseline data with perfect scores (5 points) across all evaluation traits. Subsequently, derive data for scores ranging from 4 down to 1 by injecting targeted noise mapped to each specific trait. During the generation phase, produce five candidates for each score level and employ an LLM to select the sample that demonstrates the highest alignment with the rubric descriptions.",
         "noise_method": "Content: Insertion of irrelevant sentences; Organization: Rearrangement of sentence order; Language: Induction of grammatical errors.",
-        "Types of Language Errors": "spacing(WS), spelling(SPELL), josa(PART), ending(END), conjugation(CONJ), word order(WO)",
+        "types_of_language_errors": "spacing(WS), spelling(SPELL), josa(PART), ending(END), conjugation(CONJ), word order(WO)",
         "generation_prompt": """당신은 해당 분야의 전문가입니다. 아래 논문의 내용을 바탕으로, 질문에 대해 학술적 글쓰기 기준(내용, 구성, 언어)에서 만점(5점)을 받을 수 있는 완벽한 에세이를 작성하세요. [논문 텍스트]: {context} [질문]: {question} [조건]: - 한국어로 작성할 것. - 논문의 핵심 요소(연구 목적·개념·방법·결과·의의)를 정확히 식별하고, 중요 정보를 선별하며, 불필요한 내용을 배제하고, 원문 의미를 왜곡 없이 재구성하여 완성도 높은 요약을 제시한다. - 도입–전개–결론 구조를 명확히 구성하고, 정보를 논문 흐름에 따라 논리적으로 배열하며, 단락 간 관계를 부드럽게 연결한다. 전환 표현을 적절히 사용해 글 전체가 매우 일관적이다. - 문장을 정확히 구성하고 다양한 구조를 자연스럽게 활용하며, 학술적 어조를 일관되게 유지한다. 어휘를 정밀하게 선택해 의미를 선명하게 전달한다. - 10~15 문장 내외.""",
-        "evaluation_prompt": """당신은 엄격한 학술 에세이 평가 전문가입니다. 당신의 임무는 [에세이]가 주어진 [특정 등급 루브릭]에 얼마나 완벽하게 부합(Matching)하는지 '부합도'를 산출하는 것입니다. [지침]: 1. 오직 제공된 [특정 등급 루브릭]의 내용만을 기준으로 판단하십시오. 2. '부합도 점수'가 100점에 가까울수록 해당 루브릭의 설명과 에세이의 상태가 '완벽히 일치'함을 의미합니다. [특정 등급 루브릭]: {target_trait} {target_score}점 기준: {rubric_text} [에세이]: {text} [출력 형식]: 반드시 아래 JSON 형식으로만 응답하십시오.다른 말은 포함하지 마세요. { "reasoning": "에세이의 특징과 루브릭 기준을 대조한 상세 분석 (1~2문장)", "consistency_score": "루브릭 일치도 점수 (0.00~100.00, 소수점 둘째 자리)" }""",
+        "evaluation_prompt": """당신은 엄격한 학술 에세이 평가 전문가입니다. 당신의 임무는 [에세이]가 주어진 [특정 등급 루브릭]에 얼마나 완벽하게 부합(Matching)하는지 '부합도'를 산출하는 것입니다. [지침]: 1. 오직 제공된 [특정 등급 루브릭]의 내용만을 기준으로 판단하십시오. 2. '부합도 점수'가 100점에 가까울수록 해당 루브릭의 설명과 에세이의 상태가 '완벽히 일치'함을 의미합니다. [특정 등급 루브릭]: {target_trait} {target_score}점 기준: {rubric_text} [에세이]: {text} [출력 형식]: 반드시 아래 JSON 형식으로만 응답하십시오.다른 말은 포함하지 마세요. {{ "reasoning": "에세이의 특징과 루브릭 기준을 대조한 상세 분석 (1~2문장)", "consistency_score": "루브릭 일치도 점수 (0.00~100.00, 소수점 둘째 자리)" }} """,
         "rubric": RUBRIC,
         "question":ESSAY_QUESTIONS
     }
     
+    output_file = "data/paperclinic_generated_dataset.json"
     output_datas = []
-    common_instruction = "다음 학술 에세이를 읽고, 평가 기준(내용, 구성, 언어)에 따라 채점한 뒤 결과를 JSON 형식으로 출력하세요." 
+    
+    if not os.path.exists(output_file):
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump({"metadata": metadata, "data": []}, f, ensure_ascii=False, indent=2)
+    
+    common_instruction = "다음 학술 에세이를 읽고, 평가 기준(내용, 구성, 언어)에 따라 채점한 뒤 결과를 JSON 형식으로 출력하세요."
 
     for pdf_path in pdf_files:
         paper_title = os.path.basename(pdf_path)
@@ -367,39 +373,35 @@ def main():
                 
             gold_text = clean_text(gold_text)
 
-            # Add Gold Sample
-            output_datas.append({
+            gold_entry = {
                 "instruction": common_instruction,
                 "filename": os.path.basename(pdf_path),
                 "question": question,
                 "input": gold_text,
                 "output": json.dumps({"1. 내용": 5.0, "2. 구성": 5.0, "3. 언어": 5.0, "총점": 5.0}, ensure_ascii=False),
                 "timestamp": datetime.now().isoformat(),
+                "is_original": True,
                 "noise_ratio": 0.0,
                 "noise_content_indices": [],
                 "noise_organization_swaps": [],
                 "noise_language_details": []
-            })
+            }
+            output_datas.append(gold_entry)
             
             # 2. Generate Noisy Variations
-            # We want to process tasks in batches of 2 (2 * 5 candidates = 10 parallel calls)
-            # Define all tasks in the desired order
             noise_types = ["Organization", "Language", "Content"]
             target_scores = [4.0, 3.0, 2.0, 1.0]
             
-            # Create list of tasks
             all_tasks = []
             for n_type in noise_types:
                 for score in target_scores:
                     all_tasks.append((n_type, score))
             
-            # Process in chunks of 2 tasks
             chunk_size = 3
             
             for i in range(0, len(all_tasks), chunk_size):
                 tasks_chunk = all_tasks[i : i + chunk_size]
                 
-                # Prepare candidates for this chunk (should be 10 total candidates)
                 candidates_to_evaluate = []
                 
                 for n_type, score in tasks_chunk:
@@ -414,7 +416,6 @@ def main():
                 
                 print(f"    Processing batch {i//chunk_size + 1}: {len(candidates_to_evaluate)} evaluations...")
                 
-                # Run evaluations in parallel
                 results = []
                 with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
                     futures = [executor.submit(evaluate_single_candidate, c) for c in candidates_to_evaluate]
@@ -425,7 +426,6 @@ def main():
                         except Exception as e:
                             print(f"Error in parallel execution: {e}")
                 
-                # Group results by task (noise_type, score) to select the best for each task
                 grouped_results = {}
                 for task in tasks_chunk:
                     grouped_results[task] = []
@@ -435,7 +435,6 @@ def main():
                     if key in grouped_results:
                         grouped_results[key].append(res)
                 
-                # Process each task in order (Task A then Task B)
                 for n_type, score in tasks_chunk:
                     task_candidates = grouped_results[(n_type, score)]
                     
@@ -443,7 +442,6 @@ def main():
                         print(f"      No results for {n_type} {score}")
                         continue
                         
-                    # Sort by consistency descending
                     task_candidates.sort(key=lambda x: x['consistency'], reverse=True)
                     best = task_candidates[0]
                     
@@ -452,7 +450,6 @@ def main():
                     best_consistency = best['consistency']
                     best_log = best['noise_log']
                     
-                    # Update stats
                     with stats_lock:
                         dict_consistency_average[n_type][int(score)] += best_consistency
                         dict_cnt[n_type][int(score)] += 1
@@ -464,9 +461,9 @@ def main():
                     elif n_type == "Organization": scores["2. 구성"] = float(score)
                     elif n_type == "Content": scores["1. 내용"] = float(score)
                     
-                    scores["총점"] = round(sum(scores.values()) / 3.0,2)
+                    scores["총점"] = round(sum(scores.values()) / 3.0, 2)
                     
-                    output_datas.append({
+                    new_item = {
                         "instruction": common_instruction,
                         "filename": os.path.basename(pdf_path),
                         "question": question,
@@ -475,23 +472,27 @@ def main():
                         "reasoning": best_reasoning,
                         "consistency_score": best_consistency,
                         "timestamp": datetime.now().isoformat(),
+                        "is_original": False,
                         "noise_ratio": best_log["noise_ratio"],
                         "noise_content_indices": best_log["noise_content_indices"],
                         "noise_organization_swaps": best_log["noise_organization_swaps"],
                         "noise_language_details": best_log["noise_language_details"]
-                    })
+                    }
+                    output_datas.append(new_item)
 
-    # Save Locally
-    output_file = "data/paperclinic_generated_dataset.json" # changed extension to json
-    final_output = {
-        "metadata": metadata,
-        "datas": output_datas
-    }
-    
-    with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(final_output, f, ensure_ascii=False, indent=2)
+                # Incremental Save after each batch
+                try:
+                    current_full_data = {
+                        "metadata": metadata,
+                        "data": output_datas
+                    }
+                    with open(output_file, "w", encoding="utf-8") as f:
+                        json.dump(current_full_data, f, ensure_ascii=False, indent=2)
+                    print(f"      [Auto-Save] Updated {output_file} ({len(output_datas)} samples).")
+                except Exception as e:
+                    print(f"      [Auto-Save Failed] {e}")
 
-    print(f"\nSaved {len(output_datas)} samples to {output_file}")
+    print(f"\nFinal Save: {len(output_datas)} samples to {output_file}")
     
     end_time = time.time()
     elapsed_time = end_time - start_time

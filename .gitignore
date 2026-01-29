@@ -20,6 +20,7 @@ aes_pilot_results/
 
 # Data folder rules
 # Keep the directory structure but ignore contents
+src/data_gen/data/*
 data/*
 !data/papers/
 data/papers/*

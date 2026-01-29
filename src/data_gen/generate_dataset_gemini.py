@@ -397,7 +397,7 @@ def main():
                 for score in target_scores:
                     all_tasks.append((n_type, score))
             
-            chunk_size = 1
+            chunk_size = 3
             
             for i in range(0, len(all_tasks), chunk_size):
                 tasks_chunk = all_tasks[i : i + chunk_size]
@@ -417,7 +417,7 @@ def main():
                 print(f"    Processing batch {i//chunk_size + 1}: {len(candidates_to_evaluate)} evaluations...")
                 
                 results = []
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
                     futures = [executor.submit(evaluate_single_candidate, c) for c in candidates_to_evaluate]
                     for future in concurrent.futures.as_completed(futures):
                         try:

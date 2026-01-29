@@ -175,7 +175,7 @@ def evaluate_essay(text: str, target_trait: str, target_score: float) -> Dict[st
         }}
         """
 
-    response_text = get_gpt_response(prompt, model_name="gpt-5")
+    response_text = get_gpt_response(prompt, model_name="o4-mini")
     if not response_text: 
         print("response_text is None")
         return None
@@ -321,7 +321,7 @@ def evaluate_single_candidate(candidate_info: Dict[str, Any]) -> Dict[str, Any]:
 
 def main():
     start_time = time.time()
-    papers_dir = "data/papers/gpt_2"
+    papers_dir = "data/papers/gpt"
     pdf_files = glob.glob(os.path.join(papers_dir, "*.pdf"))
     
     if not pdf_files:
@@ -334,7 +334,7 @@ def main():
     # Metadata construction
     metadata = {
         "generator_model": "gpt-5-mini",
-        "evaluator_model": "gpt-5-mini",
+        "evaluator_model": "o4-mini",
         "evaluation_method": "First, generate baseline data with perfect scores (5 points) across all evaluation traits. Subsequently, derive data for scores ranging from 4 down to 1 by injecting targeted noise mapped to each specific trait. During the generation phase, produce five candidates for each score level and employ an LLM to select the sample that demonstrates the highest alignment with the rubric descriptions.",
         "noise_method": "Content: Insertion of irrelevant sentences; Organization: Rearrangement of sentence order; Language: Induction of grammatical errors.",
         "types_of_language_errors": "spacing(WS), spelling(SPELL), josa(PART), ending(END), conjugation(CONJ), word order(WO)",

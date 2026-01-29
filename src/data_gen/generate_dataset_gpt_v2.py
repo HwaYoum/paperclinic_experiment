@@ -7,7 +7,11 @@ import time
 from typing import List, Dict, Tuple, Any
 from pypdf import PdfReader
 from dotenv import load_dotenv
-import google.generativeai as genai
+ 
+
+# import google.generativeai as genai
+from openai import OpenAI
+
 from datasets import Dataset
 from huggingface_hub import login
 import sys
@@ -20,12 +24,12 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../'
 from src.utils.augmentation_utils import KoreanNoiseInjector
 
 # Load environment variables
-# load_dotenv()
-GENAI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GENAI_API_KEY:
-    print("Warning: GEMINI_API_KEY not found.")
+load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    print("Warning: OPENAI_API_KEY not found.")
 else:
-    genai.configure(api_key=GENAI_API_KEY)
+    client = OpenAI(api_key=OPENAI_API_KEY)
 
 HF_TOKEN = os.getenv("HF_TOKEN")
 
@@ -68,6 +72,7 @@ ESSAY_QUESTIONS = [
     "이 논문의 한계점이나 향후 연구 방향을 논문 내용을 바탕으로 분석하고 설명하세요."
 ]
 
+
 # --- Utility Functions ---
 
 def clean_text(text: str) -> str:
@@ -90,15 +95,18 @@ def extract_pdf_context(pdf_path: str, max_pages: int = 5) -> str: ## 실제로 
         print(f"Error reading {pdf_path}: {e}")
         return ""
 
-def get_gemini_response(prompt: str, model_name: str = "gemini-2.5-flash") -> str:
+def get_gpt_response(prompt: str, model_name: str = "gpt-5-mini") -> str:
     max_retries = 5
     base_delay = 1
     
     for attempt in range(max_retries):
         try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
-            return response.text
+            response = client.responses.create(
+                model=model_name,
+                input=f"{prompt}\nAI:",
+            )
+            return response.output_text
+            
         except Exception as e:
             # Check for rate limit or quota errors
             error_str = str(e).lower()
@@ -107,11 +115,11 @@ def get_gemini_response(prompt: str, model_name: str = "gemini-2.5-flash") -> st
                 print(f"API Rate limit hit. Retrying in {sleep_time:.2f}s... (Attempt {attempt+1}/{max_retries})")
                 time.sleep(sleep_time)
             else:
-                print(f"Gemini API Error: {e}")
+                print(f"GPT API Error: {e}")
                 # For other errors, we might still want to retry briefly or fail
                 time.sleep(1)
     
-    print("Max retries reached for Gemini API.")
+    print("Max retries reached for GPT API.")
     return ""
 
 def split_sentences(text: str) -> List[str]:
@@ -167,21 +175,30 @@ def evaluate_essay(text: str, target_trait: str, target_score: float) -> Dict[st
         }}
         """
 
-    response_text = get_gemini_response(prompt, model_name="gemini-2.5-flash")
+    response_text = get_gpt_response(prompt, model_name="gpt-5")
     if not response_text: 
         print("response_text is None")
         return None
     
     try:
         clean_response = response_text.replace("```json", "").replace("```", "").strip()
-        match = re.search(r"\{.*\}", clean_response, re.DOTALL)
-        if match:
-            json_str = match.group(0)
+        
+        # Robust JSON extraction: find first '{' and last '}'
+        start_idx = clean_response.find("{")
+        end_idx = clean_response.rfind("}")
+        
+        if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
+            json_str = clean_response[start_idx : end_idx + 1]
             result = json.loads(json_str)
             if "consistency_score" in result:
                 result["consistency_score"] = float(result["consistency_score"])
             return result
-    except:
+        else:
+            print(f"Warning: JSON structure not found. Response: {clean_response[:200]}...")
+            
+    except Exception as e:
+        print(f"JSON parsing error: {e}")
+        # print(f"Full response causing error: {response_text}") # Uncomment for verbose debug
         pass
     
     print("try part error")
@@ -304,7 +321,7 @@ def evaluate_single_candidate(candidate_info: Dict[str, Any]) -> Dict[str, Any]:
 
 def main():
     start_time = time.time()
-    papers_dir = "data/papers/gemini"
+    papers_dir = "data/papers/gpt_2"
     pdf_files = glob.glob(os.path.join(papers_dir, "*.pdf"))
     
     if not pdf_files:
@@ -316,18 +333,18 @@ def main():
     
     # Metadata construction
     metadata = {
-        "generator_model": "gemini-2.5-flash",
-        "evaluator_model": "gemini-2.5-flash",
+        "generator_model": "gpt-5-mini",
+        "evaluator_model": "gpt-5-mini",
         "evaluation_method": "First, generate baseline data with perfect scores (5 points) across all evaluation traits. Subsequently, derive data for scores ranging from 4 down to 1 by injecting targeted noise mapped to each specific trait. During the generation phase, produce five candidates for each score level and employ an LLM to select the sample that demonstrates the highest alignment with the rubric descriptions.",
         "noise_method": "Content: Insertion of irrelevant sentences; Organization: Rearrangement of sentence order; Language: Induction of grammatical errors.",
         "types_of_language_errors": "spacing(WS), spelling(SPELL), josa(PART), ending(END), conjugation(CONJ), word order(WO)",
         "generation_prompt": """당신은 해당 분야의 전문가입니다. 아래 논문의 내용을 바탕으로, 질문에 대해 학술적 글쓰기 기준(내용, 구성, 언어)에서 만점(5점)을 받을 수 있는 완벽한 에세이를 작성하세요. [논문 텍스트]: {context} [질문]: {question} [조건]: - 한국어로 작성할 것. - 논문의 핵심 요소(연구 목적·개념·방법·결과·의의)를 정확히 식별하고, 중요 정보를 선별하며, 불필요한 내용을 배제하고, 원문 의미를 왜곡 없이 재구성하여 완성도 높은 요약을 제시한다. - 도입–전개–결론 구조를 명확히 구성하고, 정보를 논문 흐름에 따라 논리적으로 배열하며, 단락 간 관계를 부드럽게 연결한다. 전환 표현을 적절히 사용해 글 전체가 매우 일관적이다. - 문장을 정확히 구성하고 다양한 구조를 자연스럽게 활용하며, 학술적 어조를 일관되게 유지한다. 어휘를 정밀하게 선택해 의미를 선명하게 전달한다. - 10~15 문장 내외.""",
-        "evaluation_prompt": """당신은 엄격한 학술 에세이 평가 전문가입니다. 당신의 임무는 [에세이]가 주어진 [특정 등급 루브릭]에 얼마나 완벽하게 부합(Matching)하는지 '부합도'를 산출하는 것입니다. [지침]: 1. 오직 제공된 [특정 등급 루브릭]의 내용만을 기준으로 판단하십시오. 2. '부합도 점수'가 100점에 가까울수록 해당 루브릭의 설명과 에세이의 상태가 '완벽히 일치'함을 의미합니다. [특정 등급 루브릭]: {target_trait} {target_score}점 기준: {rubric_text} [에세이]: {text} [출력 형식]: 반드시 아래 JSON 형식으로만 응답하십시오.다른 말은 포함하지 마세요. { "reasoning": "에세이의 특징과 루브릭 기준을 대조한 상세 분석 (1~2문장)", "consistency_score": "루브릭 일치도 점수 (0.00~100.00, 소수점 둘째 자리)" } """,
+        "evaluation_prompt": """당신은 엄격한 학술 에세이 평가 전문가입니다. 당신의 임무는 [에세이]가 주어진 [특정 등급 루브릭]에 얼마나 완벽하게 부합(Matching)하는지 '부합도'를 산출하는 것입니다. [지침]: 1. 오직 제공된 [특정 등급 루브릭]의 내용만을 기준으로 판단하십시오. 2. '부합도 점수'가 100점에 가까울수록 해당 루브릭의 설명과 에세이의 상태가 '완벽히 일치'함을 의미합니다. [특정 등급 루브릭]: {target_trait} {target_score}점 기준: {rubric_text} [에세이]: {text} [출력 형식]: 반드시 아래 JSON 형식으로만 응답하십시오.다른 말은 포함하지 마세요. {{ "reasoning": "에세이의 특징과 루브릭 기준을 대조한 상세 분석 (1~2문장)", "consistency_score": "루브릭 일치도 점수 (0.00~100.00, 소수점 둘째 자리)" }} """,
         "rubric": RUBRIC,
         "question":ESSAY_QUESTIONS
     }
     
-    output_file = "data/paperclinic_generated_dataset_gemini.json"
+    output_file = "data/paperclinic_generated_dataset_gpt.json" 
     output_datas = []
     
     if not os.path.exists(output_file):
@@ -366,7 +383,7 @@ def main():
             - 10~15 문장 내외.
             """
             
-            gold_text = get_gemini_response(prompt_gold, model_name="gemini-2.5-flash")
+            gold_text = get_gpt_response(prompt_gold, model_name="gpt-5-mini")
             if not gold_text:
                 print("    Failed to generate gold answer.")
                 continue
@@ -397,7 +414,7 @@ def main():
                 for score in target_scores:
                     all_tasks.append((n_type, score))
             
-            chunk_size = 1
+            chunk_size = 3
             
             for i in range(0, len(all_tasks), chunk_size):
                 tasks_chunk = all_tasks[i : i + chunk_size]
@@ -417,7 +434,7 @@ def main():
                 print(f"    Processing batch {i//chunk_size + 1}: {len(candidates_to_evaluate)} evaluations...")
                 
                 results = []
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
                     futures = [executor.submit(evaluate_single_candidate, c) for c in candidates_to_evaluate]
                     for future in concurrent.futures.as_completed(futures):
                         try:

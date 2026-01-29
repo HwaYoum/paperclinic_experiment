@@ -24,8 +24,9 @@ def convert_json_to_jsonl(input_file, output_file):
 
             # Construct the new format
             new_item = {
+                "filename": item.get("filename",""),
                 "question": item.get("question", ""),
-                "essay": item.get("input", ""),
+                "essay": item.get("input", ""),                
                 "organization": scores.get("2. 구성", 0.0),
                 "language": scores.get("3. 언어", 0.0),
                 "content": scores.get("1. 내용", 0.0)

@@ -7,9 +7,9 @@ def main():
     # Define paths
     base_dir = Path(__file__).parent
     # Based on the user request, the json file is likely in data/ relative to this script
-    json_path = base_dir / "data" / "paperclinic_generated_dataset_gpt.json"
+    json_path = base_dir / "data" / "paperclinic_generated_dataset_gemini.json"
     # The papers directory
-    papers_dir = base_dir / "data" / "papers" / "gpt"
+    papers_dir = base_dir / "data" / "papers" / "gemini"
 
     print(f"Checking JSON file: {json_path}")
     print(f"Checking Papers dir: {papers_dir}")
